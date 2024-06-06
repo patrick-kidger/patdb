@@ -1,0 +1,75 @@
+import argparse
+import inspect
+import sys
+
+from ._core import debug, is_frame_pytest
+
+
+class _PytestToPatdb:
+    def __init__(self):
+        self.quitting = False
+
+    def reset(self):
+        pass
+
+    def interaction(self, _, _tb):
+        # If you have an error during test collection, trigger this function, and then
+        # `q`uit, then you actually trigger this function again internally to pytest!
+        # That's clearly just a pytest bug, but we work around it here.
+        # (Notably `--pdb` also triggers again -- without working around it -- so
+        # nothing unique to us.)
+        while _tb is not None:
+            if not is_frame_pytest(_tb.tb_frame):
+                break
+            _tb = _tb.tb_next
+        else:
+            return  # Internal pytest error during quitting.
+        # The traceback is useless to us, it doesn't have any way of getting the
+        # __cause__ or __context__ of the actual exception. Just delete it.
+        del _tb
+
+        for name in ("last_exc", "last_value"):
+            # This branch occurs if an error occurs during a test itself.
+            # In this case, grab the exception if we can.
+            try:
+                e = getattr(sys, name)
+            except AttributeError:
+                pass
+        else:
+            # This branch occurs if an error occurs during test collection.
+            # In this case, it's time for an awful hack.
+            # Unfortunately the `_tb` argument doesn't give us what we want. So we walk
+            # walk the stack and grab the thing we do want!
+            # This is wrapped in a try-except just for forward compatibility, in case
+            # the pytest folks ever change things.
+            try:
+                frame = inspect.stack()[2]
+                e = frame.frame.f_locals["excinfo"].value
+            except Exception:
+                return
+        try:
+            debug(e)
+        except SystemExit:
+            self.quitting = True
+
+    def set_trace(self, frame):
+        del frame
+        # Skip `debug`, `set_trace`, and `_pytest.debugging.pytestPDB.set_trace`.
+        debug(stacklevel=3)
+
+
+class _Action(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        del parser, values, option_string
+        namespace.usepdb = True
+        namespace.usepdb_cls = (_PytestToPatdb.__module__, _PytestToPatdb.__name__)
+
+
+def pytest_addoption(parser):
+    group = parser.getgroup("patdb")
+    group.addoption(
+        "--patdb",
+        action=_Action,
+        nargs=0,
+        help="Open a `patdb` debugger on error.",
+    )

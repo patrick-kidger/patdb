@@ -1,0 +1,49 @@
+[project]
+name = "patdb"
+version = "0.0.1"
+description = "Pat's Python debugger"
+readme = "README.md"
+requires-python ="~=3.9"
+license = {file = "LICENSE"}
+authors = [
+  {name = "Patrick Kidger", email = "contact@kidger.site"},
+]
+keywords = ["pdb", "bdb", "patdb", "debug", "debugger"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Programming Language :: Python :: 3",
+]
+urls = {repository = "https://github.com/patrick-kidger/patdb" }
+dependencies = ["click>=8.1.7", "prompt_toolkit>=3.0.46", "ptpython>=3.0.27", "pygments>=2.18.0", "typing_extensions>=4.5.0"]
+entry-points = {pytest11 = {patdb = "patdb._pytest_plugin"}}
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+include = ["patdb/*"]
+
+[tool.ruff]
+extend-include = ["*.ipynb"]
+src = []
+
+[tool.ruff.lint]
+fixable = ["I001", "F401"]
+ignore = ["E402", "E721", "E731", "E741", "F722"]
+ignore-init-module-imports = true
+select = ["E", "F", "I001"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+extra-standard-library = ["typing_extensions"]
+lines-after-imports = 2
+order-by-type = false
+
+[tool.pyright]
+reportIncompatibleMethodOverride = true
+reportIncompatibleVariableOverride = false
+reportFunctionMemberAccess = false
+include = ["patdb", "tests"]

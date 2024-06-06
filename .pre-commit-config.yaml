@@ -1,0 +1,14 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff-format # formatter
+        types_or: [python, pyi, jupyter]
+      - id: ruff # linter
+        types_or: [python, pyi, jupyter]
+        args: [--fix]
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.351
+    hooks:
+      - id: pyright
+        additional_dependencies: ["click>=8.1.7", "ptpython>=3.0.27", "pygments>=2.18.0"]
