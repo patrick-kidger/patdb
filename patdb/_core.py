@@ -804,15 +804,16 @@ def _make_arrow(*, current: bool, interactive: bool) -> str:
     return arrow1 + arrow2
 
 
+def _error_pieces(x: str) -> str:
+    return ".".join(click.style(m, fg=_config.error_colour) for m in x.split("."))
+
+
 def _format_exception(e: BaseException, short: bool) -> list[str]:
-    qualname = click.style(e.__class__.__qualname__, fg=_config.error_colour)
+    qualname = _error_pieces(e.__class__.__qualname__)
     if e.__class__.__module__ == "builtins":
         coloured_module = "builtins"
     else:
-        coloured_module = ".".join(
-            click.style(m, fg=_config.error_colour)
-            for m in e.__class__.__module__.split(".")
-        )
+        coloured_module = _error_pieces(e.__class__.__module__)
     if short:
         if coloured_module == "builtins":
             return [qualname]
@@ -843,12 +844,12 @@ def _format_frame(frame: types.FrameType, prefix: Optional[str] = None) -> str:
             file = file.removeprefix(prefix)
     elif not file.startswith("<"):
         file = "./" + file
-    name = frame.f_code.co_name
+    name = frame.f_code.co_qualname
     current_line = str(frame.f_lineno)
     function_line = str(frame.f_code.co_firstlineno)
     return (
-        f"File {_emph(file)}, line {_emph(current_line)}, in "
-        f"{_emph(name)} defined at line {_emph(function_line)}"
+        f"File {_emph(file)}, at {_emph(name)} from {_emph(function_line)}, "
+        f"line {_emph(current_line)}"
     )
 
 
@@ -1134,6 +1135,24 @@ def _update_and_display_move(
             msg = _format_frame(frame)
         state = dataclasses.replace(state, location=move.location)
     _echo_first_line(msg)
+    frame = _current_frame(state.location)
+    if not isinstance(frame, str):
+        # If it's a string then we're in a frameless callstack, and our existing
+        # `frameless_msg` applies.
+        try:
+            source_lines, _ = inspect.getsourcelines(frame)
+            index = frame.f_lineno - frame.f_code.co_firstlineno
+            if index < 0:
+                raise IndexError
+            source_line = source_lines[index]
+        except (OSError, IndexError):
+            # I don't know if the IndexError is ever possible, but just in case.
+            source_line = "<no source found>"
+        else:
+            source_line = _format_source(
+                source_line.rstrip(), frame.f_lineno, frame.f_lineno
+            )
+        _echo_later_lines(source_line)
     _echo_newline_end_command()
     return state
 
