@@ -347,6 +347,44 @@ def _echo_newline_end_command():
 #
 
 
+# Pairing the frame object with the traceback `tb.tb_lineno`.
+#
+# Note that `tb.tb_lineno` is the same as `tb.tb_frame.f_lineno` 99% of the time... but
+# not 100% of the time! When creating custom code objects without filling in their
+# `co_exceptiontable` and `co_linetable` (I think it's these), then any frame with that
+# code object as their `f_code` will in turn have their `f_lineno` set to `None`.
+#
+# (`f_lineno` exist for the sake of debuggers that jump around
+# (https://docs.python.org/3/reference/datamodel.html#index-65)
+# so if at some point we support line-by-line evaluation then we should consider using
+# it.)
+@dataclasses.dataclass(frozen=True, eq=False)
+class _Frame:
+    _frame: types.FrameType
+    line: int
+
+    @property
+    def f_code(self):
+        return self._frame.f_code
+
+    @property
+    def f_locals(self):
+        return self._frame.f_locals
+
+    @property
+    def f_globals(self):
+        return self._frame.f_globals
+
+    def getsource(self):
+        return inspect.getsource(self._frame)
+
+    def getsourcelines(self):
+        return inspect.getsourcelines(self._frame)
+
+    def getsourcefile(self):
+        return inspect.getsourcefile(self._frame)
+
+
 class _CallstackKind(enum.Enum):
     # Order corresponds to the order printed out when we have multiple kinds.
     toplevel = 0
@@ -360,7 +398,7 @@ class _CallstackKind(enum.Enum):
 class _Callstack:
     _up_callstack: Optional[weakref.ref[Self]]
     down_callstacks: tuple[Self, ...]
-    frames: tuple[types.FrameType, ...]
+    frames: tuple[_Frame, ...]
     kinds: frozenset[_CallstackKind]
     exception: Optional[BaseException]
     collapse_default: bool
@@ -392,9 +430,9 @@ def _get_callstacks_from_error(
     collapse_default: bool,
 ) -> _Callstack:
     tb = exception.__traceback__
-    frames = []
+    frames: list[_Frame] = []
     while tb is not None:
-        frames.append(tb.tb_frame)
+        frames.append(_Frame(tb.tb_frame, tb.tb_lineno))
         tb = tb.tb_next
     callstack = _Callstack(
         _up_callstack=None if up_callstack is None else weakref.ref(up_callstack),
@@ -503,7 +541,7 @@ class _Location:
             assert 0 <= self.frame_idx < len(self.callstack.frames)
 
 
-def _current_frame(location: _Location) -> Union[str, types.FrameType]:
+def _current_frame(location: _Location) -> Union[str, _Frame]:
     if location.frame_idx is None:
         return "<Frameless callstack>"
     else:
@@ -599,12 +637,12 @@ class _State:
     root_callstack: _Callstack
 
 
-def _is_frame_frozen(frame: types.FrameType) -> bool:
+def _is_frame_frozen(frame: _Frame) -> bool:
     # Skip the noise from `runpy`, in particular as used in our `__main__.py`.
     return frame.f_globals.get("__loader__", None) is importlib.machinery.FrozenImporter
 
 
-def _is_frame_nameless(frame: types.FrameType) -> bool:
+def _is_frame_nameless(frame: _Frame) -> bool:
     # Skip the noise from JAX's JaxStackTraceBeforeTransformation causes, which are
     # highly sus. They're placed out-of-order in the __cause__/__context__ stack because
     # default `pdb` does a terrible job and orders chained stack frames
@@ -614,14 +652,14 @@ def _is_frame_nameless(frame: types.FrameType) -> bool:
     return "__name__" not in frame.f_globals
 
 
-def _is_frame_angled(frame: types.FrameType) -> bool:
+def _is_frame_angled(frame: _Frame) -> bool:
     # In particular `ptpython`'s REPL has the filename listed as `<stdin>`, but (unlike
     # the normal Python REPL) does not set `__name__`. So we need to carve out an
     # exception from `_is_frame_nameless`.
     return frame.f_code.co_filename.startswith("<")
 
 
-def is_frame_pytest(frame: types.FrameType) -> bool:
+def is_frame_pytest(frame: _Frame) -> bool:
     # Skip all of the noise in pytest when using the `--patdb` flag.
     name = frame.f_globals.get("__name__", "")
     for module in ("pytest", "_pytest", "pluggy"):
@@ -630,7 +668,7 @@ def is_frame_pytest(frame: types.FrameType) -> bool:
     return False
 
 
-def _is_frame_hidden(frame: types.FrameType) -> bool:
+def _is_frame_hidden(frame: _Frame) -> bool:
     return (
         frame.f_locals.get("__tracebackhide__", False)
         or _is_frame_frozen(frame)
@@ -837,15 +875,16 @@ def _format_exception(e: BaseException, short: bool) -> list[str]:
         return [line.rstrip() for line in values]
 
 
-def _format_frame(frame: types.FrameType, prefix: Optional[str] = None) -> str:
+def _format_frame(frame: _Frame, prefix: Optional[str] = None) -> str:
     file = frame.f_code.co_filename
     if file.startswith("/"):
         if prefix is not None:
             file = file.removeprefix(prefix)
     elif not file.startswith("<"):
         file = "./" + file
-    name = frame.f_code.co_qualname
-    current_line = str(frame.f_lineno)
+    # co_qualname is Python 3.11+
+    name = getattr(frame.f_code, "co_qualname", "co_name")
+    current_line = str(frame.line)
     function_line = str(frame.f_code.co_firstlineno)
     return (
         f"File {_emph(file)}, at {_emph(name)} from {_emph(function_line)}, "
@@ -1140,8 +1179,8 @@ def _update_and_display_move(
         # If it's a string then we're in a frameless callstack, and our existing
         # `frameless_msg` applies.
         try:
-            source_lines, _ = inspect.getsourcelines(frame)
-            index = frame.f_lineno - frame.f_code.co_firstlineno
+            source_lines, _ = frame.getsourcelines()
+            index = frame.line - frame.f_code.co_firstlineno
             if index < 0:
                 raise IndexError
             source_line = source_lines[index]
@@ -1149,9 +1188,7 @@ def _update_and_display_move(
             # I don't know if the IndexError is ever possible, but just in case.
             source_line = "<no source found>"
         else:
-            source_line = _format_source(
-                source_line.rstrip(), frame.f_lineno, frame.f_lineno
-            )
+            source_line = _format_source(source_line.rstrip(), frame.line, frame.line)
         _echo_later_lines(source_line)
     _echo_newline_end_command()
     return state
@@ -1171,7 +1208,7 @@ def _make_namespaces(state: _State) -> tuple[dict[str, Any], dict[str, Any]]:
     # Fix for https://github.com/prompt-toolkit/ptpython/issues/581
     globals["exit"] = sys.exit
     globals["quit"] = sys.exit
-    globals["__frame__"] = frame
+    globals["__frame__"] = frame._frame
     if state.location.callstack.exception is not None:
         globals["__exception__"] = state.location.callstack.exception
     # Need to merge them so that name list comprehensions work. Basically we make our
@@ -1285,15 +1322,15 @@ def _show_function(state: _State) -> _State:
         _echo_first_line(frame)
     else:
         try:
-            source = inspect.getsource(frame)
+            source = frame.getsource()
         except OSError:
             _echo_first_line("<no source found>")
         else:
             outs = _format_source(
-                source.rstrip(), frame.f_code.co_firstlineno, frame.f_lineno
+                source.rstrip(), frame.f_code.co_firstlineno, frame.line
             )
             _echo_later_lines(outs)
-            _echo_later_lines(f"Currently on line {frame.f_lineno}.")
+            _echo_later_lines(f"Currently on line {frame.line}.")
     _echo_newline_end_command()
     return state
 
@@ -1308,7 +1345,7 @@ def _show_file(state: _State) -> _State:
         _echo_first_line(frame)
     else:
         try:
-            filepath = inspect.getsourcefile(frame)
+            filepath = frame.getsourcefile()
             if filepath is None:
                 raise TypeError
         except TypeError:
@@ -1316,9 +1353,9 @@ def _show_file(state: _State) -> _State:
         else:
             _echo_first_line(_bold(filepath))
             source = pathlib.Path(filepath).read_text().rstrip()
-            outs = _format_source(source, 1, frame.f_lineno)
+            outs = _format_source(source, 1, frame.line)
             _echo_later_lines(outs)
-            _echo_later_lines(f"Currently on line {frame.f_lineno}.")
+            _echo_later_lines(f"Currently on line {frame.line}.")
     _echo_newline_end_command()
     return state
 
@@ -1616,7 +1653,7 @@ def _edit(state: _State) -> _State:
         _echo_newline_end_command()
         return state
     filename = frame.f_code.co_filename
-    linenumber = str(frame.f_lineno)
+    linenumber = str(frame.line)
     line_editor = _config.line_editor
     if line_editor is None:
         editor = _config.editor
@@ -1825,12 +1862,15 @@ def debug(*args, stacklevel: int = 1):
     else:
         if e is None:
             # Called as an explicit `breakpoint()`.
-            frames = tuple(x.frame for x in inspect.stack()[stacklevel:][::-1])
+            frames = tuple(
+                _Frame(x.frame, x.frame.f_lineno)
+                for x in inspect.stack()[stacklevel:][::-1]
+            )
         elif isinstance(e, types.TracebackType):
             # Called as an explicit `patdb.debug(some_traceback)`.
             frames = []
             while e is not None:
-                frames.append(e.tb_frame)
+                frames.append(_Frame(e.tb_frame, e.tb_lineno))
                 e = e.tb_next
             frames = tuple(frames)
         else:
@@ -1843,6 +1883,7 @@ def debug(*args, stacklevel: int = 1):
             exception=None,
             collapse_default=False,
         )
+        del frames
 
     #
     # Step 2: build our keybindings
@@ -1975,15 +2016,14 @@ def debug(*args, stacklevel: int = 1):
         click.echo(f"{detected_keys}: ", nl=False)
         state = detected_fn(state)
 
-    # We a variable here that we explicitly hang on to for the lifetime of `debug`.
+    # We have a variable here that we explicitly hang on to for the lifetime of `debug`.
+    # This `del` is used as a static assertion (for pyright) that it has *not* been
+    # `del`'d at any previous point.
     #
-    # This is the topmost callstack (the one with kind 'toplevel'). Our callstacks are
-    # laid out as a tree, with nodes holding strong references to their children but
-    # weak references to their parents. The changing `state` of our REPL only holds a
-    # reference to the particular callstack we're currently interacting with.
-    #
-    # So we need to hold on to a reference to the root to be sure that they all stay in
-    # memory until `debug` is done!
+    # Our callstacks are laid out as a tree, with nodes holding strong references to
+    # their children but weak references to their parents. So we need to hold on to a
+    # reference to the root to be sure that they all stay in memory until `debug` is
+    # done.
     #
     # The reason for the use of these weakrefs is to avoid creating cyclic garbage,
     # with our callstacks holding strong references to each other. Python will clean
