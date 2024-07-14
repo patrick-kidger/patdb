@@ -883,7 +883,10 @@ def _format_frame(frame: _Frame, prefix: Optional[str] = None) -> str:
     elif not file.startswith("<"):
         file = "./" + file
     # co_qualname is Python 3.11+
-    name = getattr(frame.f_code, "co_qualname", "co_name")
+    try:
+        name = frame.f_code.co_qualname
+    except AttributeError:
+        name = frame.f_code.co_name
     current_line = str(frame.line)
     function_line = str(frame.f_code.co_firstlineno)
     return (
@@ -1007,10 +1010,10 @@ def _format_callstack(
             else:
                 hidden_left = " "
                 hidden_right = " "
-            yield (
-                f"{frame_arrow}{indent}{hidden_left}{frame_str}{hidden_right}",
-                is_interactive_frame,
-            )
+            stack_line = f"{frame_arrow}{indent}{hidden_left}{frame_str}{hidden_right}"
+            if is_interactive_frame or is_current_frame:
+                stack_line = _bold(stack_line)
+            yield stack_line, is_interactive_frame
         if callstack.exception is not None:
             e_lines = _format_exception(callstack.exception, short)
             for line in e_lines[:-1]:
@@ -1626,14 +1629,18 @@ def _print(state: _State) -> _State:
     try:
         value = eval(text, globals, locals)
     except BaseException as e:
-        value = "\n".join(_format_exception(e, short=False))
+        string = "\n".join(_format_exception(e, short=False))
     else:
         width = shutil.get_terminal_size().columns
-        value = pprint.pformat(
+        string = pprint.pformat(
             value, width=width, compact=True, sort_dicts=False, underscore_numbers=True
         )
-        value = _syntax_highlight(value)
-    _echo_first_line(value)  # `prompt` adds a newline.
+        if "\x1b" not in string:
+            # If there's an escape code in there, then probably `string` has already
+            # returned something with pretty formatting. Let's not try to second-guess
+            # it.
+            string = _syntax_highlight(string)
+    _echo_first_line(string)  # `prompt` adds a newline.
     _echo_newline_end_command()
     return dataclasses.replace(state, print_history=history)
 
@@ -1681,13 +1688,7 @@ def _interpret(state: _State) -> _State:
         return state
     # Adjust our prompts based on how nested our interpreters and debuggers are.
     globals, locals = _make_namespaces(state)
-    depth = _config.depth
-    if depth is None:
-        depth_int = 0
-    else:
-        depth_int = depth
     try:
-        _config.depth = depth_int + 1
         _echo_later_lines("")
         ptpython.repl.embed(
             globals,
@@ -1697,11 +1698,6 @@ def _interpret(state: _State) -> _State:
         )
     except SystemExit:
         pass
-    finally:
-        if depth is None:
-            del _config.depth
-        else:
-            _config.depth = depth
     # We already have a spurious newline from the interpreter
     # _echo_newline_end_command()
     return state
@@ -1992,29 +1988,40 @@ def debug(*args, stacklevel: int = 1):
         output=output,
     )
     prompt = _patdb_prompt()
-    while not state.done:
-        click.echo(prompt, nl=False)
-        t = threading.Thread(target=app.run)
-        t.start()
-        t.join()
-        assert detected_fn is not None
-        assert detected_keys is not None
-        # Convention on \n:
-        #
-        # We split up the response of each command into the "first line" (appears on
-        # the same line as the prompt and the detected keys) and the "later lines"
-        # (appears on subsequent lines).
-        # Every command should call the `_echo_first_line` or `_echo_later_lines`
-        # functions to do the right thing.
-        # Every command should end with a call to `_echo_newline_end_command` to insert
-        # the newline for the next prompt.
-        #
-        # We let each command handle doing this, as someone of them call out to other
-        # processes, which don't always do consistent things. This offers some wiggle
-        # room as an escape hatch. (E.g. `interact` leaves off
-        # `_echo_newline_end_command`).
-        click.echo(f"{detected_keys}: ", nl=False)
-        state = detected_fn(state)
+    config_depth = _config.depth
+    if config_depth is None:
+        _config.depth = 1
+    else:
+        _config.depth = config_depth + 1
+    try:
+        while not state.done:
+            click.echo(prompt, nl=False)
+            t = threading.Thread(target=app.run)
+            t.start()
+            t.join()
+            assert detected_fn is not None
+            assert detected_keys is not None
+            # Convention on \n:
+            #
+            # We split up the response of each command into the "first line" (appears on
+            # the same line as the prompt and the detected keys) and the "later lines"
+            # (appears on subsequent lines).
+            # Every command should call the `_echo_first_line` or `_echo_later_lines`
+            # functions to do the right thing.
+            # Every command should end with a call to `_echo_newline_end_command` to
+            # insert the newline for the next prompt.
+            #
+            # We let each command handle doing this, as someone of them call out to
+            # other processes, which don't always do consistent things. This offers some
+            # wiggle room as an escape hatch. (E.g. `interact` leaves off
+            # `_echo_newline_end_command`).
+            click.echo(f"{detected_keys}: ", nl=False)
+            state = detected_fn(state)
+    finally:
+        if config_depth is None:
+            del _config.depth
+        else:
+            _config.depth = config_depth
 
     # We have a variable here that we explicitly hang on to for the lifetime of `debug`.
     # This `del` is used as a static assertion (for pyright) that it has *not* been
