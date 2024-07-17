@@ -343,6 +343,21 @@ def _echo_newline_end_command():
 
 
 #
+# Utilities
+#
+
+
+class ExcThread(threading.Thread):
+    exc = None
+
+    def run(self, *args, **kwargs):
+        try:
+            super().run(*args, **kwargs)
+        except Exception as exc:
+            self.exc = exc
+
+
+#
 # Managing callstacks and frames
 #
 
@@ -1996,9 +2011,24 @@ def debug(*args, stacklevel: int = 1):
     try:
         while not state.done:
             click.echo(prompt, nl=False)
-            t = threading.Thread(target=app.run)
+            t = ExcThread(target=app.run)
             t.start()
             t.join()
+            if t.exc is not None:
+                if type(t.exc) is EOFError:
+                    raise RuntimeError(
+                        "Could not start the debugger, probably because it could not "
+                        "connect to `sys.{stdin,stdout}`.\n"
+                        "If you are using `breakpoint()` or `patdb.debug()` from "
+                        "within `pytest`, then this can be fixed by adding the `-s` "
+                        "flag.\n"
+                        "If you are using `patdb` from within an environment like "
+                        "Jupyter or Marimo, then unfortunately these are not "
+                        "compatible with `patdb`, as these environments do not support "
+                        "terminal emulation capabilities."
+                    ) from t.exc
+                else:
+                    raise t.exc
             assert detected_fn is not None
             assert detected_keys is not None
             # Convention on \n:
