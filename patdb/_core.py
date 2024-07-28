@@ -390,14 +390,26 @@ class _Frame:
     def f_globals(self):
         return self._frame.f_globals
 
-    def getsource(self):
-        return inspect.getsource(self._frame)
+    @ft.cache  # Cache result in case we modify the file via `(e)dit`.
+    def get_function_source(self) -> Optional[list[str]]:
+        try:
+            lines, _ = inspect.getsourcelines(self._frame)
+        except OSError:
+            return None
+        else:
+            return lines
 
-    def getsourcelines(self):
-        return inspect.getsourcelines(self._frame)
-
-    def getsourcefile(self):
-        return inspect.getsourcefile(self._frame)
+    @ft.cache  # Cache result in case we modify the file via `(e)dit`.
+    def get_file_source(self) -> Optional[tuple[str, str]]:
+        filename = self.f_code.co_filename
+        filepath = pathlib.Path(filename).resolve()
+        if filepath.exists():
+            source = filepath.read_text().rstrip()
+            # Return the raw `filename`, not `filepath`. This is the 'pretty'
+            # (unresolved) path.
+            return filename, source
+        else:
+            return None
 
 
 class _CallstackKind(enum.Enum):
@@ -650,6 +662,8 @@ class _State:
     print_history: prompt_toolkit.history.InMemoryHistory
     helpmsg: str
     root_callstack: _Callstack
+    depth: Optional[int]
+    modified_files: frozenset[pathlib.Path]
 
 
 def _is_frame_frozen(frame: _Frame) -> bool:
@@ -790,27 +804,34 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
 
 # Note that we must not cache the result of this function, as else nested `patdb`
 # instances will not pick up on the correct depth.
-def _patdb_prompt() -> str:
+def _patdb_prompt(depth: Optional[int]) -> str:
     """The REPL command prompt."""
-    depth = _config.depth
     if depth is None:
-        depth = ""
-    return click.style(f"patdb{depth}> ", fg=_config.prompt_colour)
+        prompt = "patdb> "
+    else:
+        prompt = f"patdb{depth}> "
+    return click.style(prompt, fg=_config.prompt_colour)
 
 
-def _patdb_info(x: str):
+def _patdb_info(x: Union[str, list[str]], depth: Optional[int]):
     """Used to display information about `patdb` itself, e.g. command hints.
 
     Should NOT be used to display information about the current session state, e.g.
     stack locations.
     """
-    depth = _config.depth
     if depth is None:
-        depth = ""
-    return click.style(f"patdb{depth}: " + x, fg=_config.info_colour)
+        prompt = "patdb: "
+    else:
+        prompt = f"patdb{depth}: "
+    if isinstance(x, str):
+        xs = x.splitlines()
+    else:
+        xs = x
+    xs = [prompt + xi for xi in xs]
+    return click.style("".join(xs), fg=_config.info_colour)
 
 
-def _make_key_bindings(key_mapping: dict[Callable, str]):
+def _make_key_bindings(key_mapping: dict[Callable, str], depth: Optional[int]):
     errors = []
     key_bindings = prompt_toolkit.key_binding.KeyBindings()
     fn_keys = {}
@@ -827,7 +848,8 @@ def _make_key_bindings(key_mapping: dict[Callable, str]):
                     _patdb_info(
                         f"Misconfigured `patdb`. `{key}` is being used for both "
                         f"`{_fn_to_name(existing_fn)}` and `{_fn_to_name(fn)}`. "
-                        f"Keeping just `{_fn_to_name(existing_fn)}`."
+                        f"Keeping just `{_fn_to_name(existing_fn)}`.",
+                        depth,
                     )
                 )
                 continue
@@ -839,7 +861,7 @@ def _make_key_bindings(key_mapping: dict[Callable, str]):
             except ValueError:
                 errors.append(
                     _patdb_info(
-                        f"Misconfigured `patdb`. `{key}` is not a valid command."
+                        f"Misconfigured `patdb`. `{key}` is not a valid command.", depth
                     )
                 )
     return key_bindings, fn_keys, errors
@@ -1196,17 +1218,18 @@ def _update_and_display_move(
     if not isinstance(frame, str):
         # If it's a string then we're in a frameless callstack, and our existing
         # `frameless_msg` applies.
-        try:
-            source_lines, _ = frame.getsourcelines()
-            index = frame.line - frame.f_code.co_firstlineno
-            if index < 0:
-                raise IndexError
-            source_line = source_lines[index]
-        except (OSError, IndexError):
-            # I don't know if the IndexError is ever possible, but just in case.
+        source_lines = frame.get_function_source()
+        if source_lines is None:
             source_line = "<no source found>"
         else:
-            source_line = _format_source(source_line.rstrip(), frame.line, frame.line)
+            index = frame.line - frame.f_code.co_firstlineno
+            if index < 0:
+                # I don't know if this is ever possible, but just in case.
+                source_line = "<no source found>"
+            else:
+                source_line = _format_source(
+                    source_lines[index].rstrip(), frame.line, frame.line
+                )
         _echo_later_lines(source_line)
     _echo_newline_end_command()
     return state
@@ -1234,6 +1257,53 @@ def _make_namespaces(state: _State) -> tuple[dict[str, Any], dict[str, Any]]:
     globals.update(frame.f_locals)
     locals = {}
     return globals, locals
+
+
+def _subprocess_edit(
+    cmd: list[str],
+    root_callstack: _Callstack,
+    filepath: pathlib.Path,
+    editor: str,
+    depth: Optional[int],
+    is_modified: bool,
+) -> tuple[int, bool]:
+    filesource = filepath.read_bytes()
+    agenda = [root_callstack]
+    while len(agenda) > 0:
+        callstack = agenda.pop()
+        agenda.extend(callstack.down_callstacks)
+        for frame in callstack.frames:
+            if pathlib.Path(frame.f_code.co_filename).resolve() == filepath:
+                # Cache the source for all frames using this file, before we potentially
+                # modify the file.
+                frame.get_function_source()
+                frame.get_file_source()
+    if is_modified:
+        _echo_later_lines(
+            _patdb_info(
+                f"Warning: file `{filepath}` has been edited. This file does not "
+                "necessarily correspond to the Python source that was actually ran, "
+                "and the line at which the file is opened may be incorrect. Press any "
+                "key to continue.",
+                depth,
+            )
+        )
+        click.getchar()
+    try:
+        result = subprocess.run(cmd)
+    except Exception as e:
+        # e.g. a PermissionError from `cmd` not existing.
+        _echo_later_lines(_patdb_info(_format_exception(e, short=False), depth))
+        _echo_later_lines(
+            _patdb_info(
+                f"Error in subprocess call. Is your `{editor}` set to a valid "
+                "executable?",
+                depth,
+            )
+        )
+        return 0, False
+    else:
+        return result.returncode, filesource != filepath.read_bytes()
 
 
 def _make_help(fn_keys):
@@ -1339,13 +1409,12 @@ def _show_function(state: _State) -> _State:
     if isinstance(frame, str):
         _echo_first_line(frame)
     else:
-        try:
-            source = frame.getsource()
-        except OSError:
+        lines = frame.get_function_source()
+        if lines is None:
             _echo_first_line("<no source found>")
         else:
             outs = _format_source(
-                source.rstrip(), frame.f_code.co_firstlineno, frame.line
+                "".join(lines).rstrip(), frame.f_code.co_firstlineno, frame.line
             )
             _echo_later_lines(outs)
             _echo_later_lines(f"Currently on line {frame.line}.")
@@ -1362,15 +1431,12 @@ def _show_file(state: _State) -> _State:
     if isinstance(frame, str):
         _echo_first_line(frame)
     else:
-        try:
-            filepath = frame.getsourcefile()
-            if filepath is None:
-                raise TypeError
-        except TypeError:
+        filepath__source = frame.get_file_source()
+        if filepath__source is None:
             _echo_first_line("<no source found>")
         else:
+            filepath, source = filepath__source
             _echo_first_line(_bold(filepath))
-            source = pathlib.Path(filepath).read_text().rstrip()
             outs = _format_source(source, 1, frame.line)
             _echo_later_lines(outs)
             _echo_later_lines(f"Currently on line {frame.line}.")
@@ -1515,7 +1581,7 @@ def _stack(state: _State) -> _State:
         _stack_select: _config.key_stack_select,
         _stack_leave: _config.key_stack_leave,
     }
-    key_bindings, fn_keys, errors = _make_key_bindings(key_mapping)
+    key_bindings, fn_keys, errors = _make_key_bindings(key_mapping, state.depth)
     for error in errors:
         _echo_later_lines(error)
     text = _format_callstack_windowed(
@@ -1559,7 +1625,8 @@ def _stack(state: _State) -> _State:
             f"{'/'.join(fn_keys[_toggle_collapse_all])} to show/hide every callstack; "
             f"{'/'.join(fn_keys[_stack_select])} to switch to a frame; "
             f"{'/'.join(fn_keys[_stack_leave])} to leave stack mode without switching."
-            "\n"
+            "\n",
+            state.depth,
         )
     )
     t = threading.Thread(target=app.run)
@@ -1675,22 +1742,54 @@ def _edit(state: _State) -> _State:
         _echo_newline_end_command()
         return state
     filename = frame.f_code.co_filename
+    filepath = pathlib.Path(filename).resolve()
+    if not filepath.exists():
+        _echo_later_lines(
+            _patdb_info(f"No source available for filename `{filename}`.", state.depth)
+        )
+        _echo_newline_end_command()
+        return state
     linenumber = str(frame.line)
     line_editor = _config.line_editor
-    if line_editor is None:
+    is_modified = filepath in state.modified_files
+    if line_editor is None or line_editor == "":
         editor = _config.editor
-        if editor is None:
+        if editor is None or editor == "":
             _echo_later_lines(
-                _patdb_info("Neither EDITOR nor PATDB_EDITOR is configured.")
+                _patdb_info(
+                    "Neither `EDITOR` nor `PATDB_EDITOR` is configured.", state.depth
+                )
             )
-            result = subprocess.CompletedProcess(args="", returncode=0)
+            returncode = 0
+            modified = False
         else:
-            result = subprocess.run([editor, filename])
+            returncode, modified = _subprocess_edit(
+                [editor, filename],
+                state.root_callstack,
+                filepath,
+                "EDITOR",
+                state.depth,
+                is_modified,
+            )
     else:
-        result = subprocess.run([line_editor, filename, linenumber])
-    if result.returncode != 0:
-        _echo_later_lines(_patdb_info(f"Error with returncode {result.returncode}"))
+        returncode, modified = _subprocess_edit(
+            [line_editor, filename, linenumber],
+            state.root_callstack,
+            filepath,
+            "PATDB_EDITOR",
+            state.depth,
+            is_modified,
+        )
+    if returncode != 0:
+        _echo_later_lines(
+            _patdb_info(f"Error with returncode {returncode}", state.depth)
+        )
     _echo_newline_end_command()
+    if modified:
+        modified_files = frozenset(
+            {*state.modified_files, pathlib.Path(filename).resolve()}
+        )
+        state = dataclasses.replace(state, modified_files=modified_files)
     return state
 
 
@@ -1915,7 +2014,8 @@ def debug(*args, stacklevel: int = 1):
         _quit: _config.key_quit,
         _help: _config.key_help,
     }
-    key_bindings_, fn_keys, errors = _make_key_bindings(key_mapping)
+    depth = _config.depth
+    key_bindings_, fn_keys, errors = _make_key_bindings(key_mapping, depth)
     if len(errors) != 0:
         for error in errors:
             _echo_first_line(error)
@@ -1960,6 +2060,8 @@ def debug(*args, stacklevel: int = 1):
         print_history=prompt_toolkit.history.InMemoryHistory(),
         helpmsg=helpmsg,
         root_callstack=root_callstack,
+        depth=depth,
+        modified_files=frozenset(),
     )
 
     #
@@ -1981,7 +2083,9 @@ def debug(*args, stacklevel: int = 1):
         pass
     else:
         helpkeys = "/".join(helpkeys)
-        click.echo(_patdb_info(f"Press {helpkeys} for a list of all commands."))
+        click.echo(
+            _patdb_info(f"Press {helpkeys} for a list of all commands.", state.depth)
+        )
         del helpkeys
     del fn_keys
 
@@ -2002,12 +2106,11 @@ def debug(*args, stacklevel: int = 1):
         include_default_pygments_style=False,
         output=output,
     )
-    prompt = _patdb_prompt()
-    config_depth = _config.depth
-    if config_depth is None:
+    prompt = _patdb_prompt(state.depth)
+    if state.depth is None:
         _config.depth = 1
     else:
-        _config.depth = config_depth + 1
+        _config.depth = state.depth + 1
     try:
         while not state.done:
             click.echo(prompt, nl=False)
@@ -2048,10 +2151,10 @@ def debug(*args, stacklevel: int = 1):
             click.echo(f"{detected_keys}: ", nl=False)
             state = detected_fn(state)
     finally:
-        if config_depth is None:
+        if state.depth is None:
             del _config.depth
         else:
-            _config.depth = config_depth
+            _config.depth = state.depth
 
     # We have a variable here that we explicitly hang on to for the lifetime of `debug`.
     # This `del` is used as a static assertion (for pyright) that it has *not* been
