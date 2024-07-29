@@ -1,5 +1,5 @@
 <h1 align="center">patdb</h1>
-<h2 align="center">A snappy + easy + pretty debugger for Python.</h2>
+<h2 align="center">A snappy + easy + pretty TUI debugger for Python.</h2>
 
 - The only Python debugger to allow inspecting re-raised or grouped exceptions!
 - Inspect frames in a full Python REPL, with syntax highlighting and autocompletion.
@@ -36,23 +36,25 @@ When running a file: `python -m patdb foo.py`. When running interactively: call 
 ## Commands
 
 ```
-j: down_frame     - Move one frame down.
-k: up_frame       - Move one frame up.
-J: down_callstack - Move one callstack down.
-K: up_callstack   - Move one callstack up.
-s: show_function  - Show the current function's source code.
-S: show_file      - Show the current file's source code.
-t: stack          - Scroll through all frames in all callstacks.
-p: print          - Prints the value of a variable.
-e: edit           - Open the current function in your $EDITOR.
-i: interpret      - Open a Python interpreter in the current frame.
-v: visibility     - Toggles skipping hidden frames in other commands.
-c: continue       - Close the debugger and continue the program.
-q: quit           - Quit the whole Python program.
-?: help           - Display a list of all debugger commands.
+j         : down_frame     - Move one frame down.
+k         : up_frame       - Move one frame up.
+J         : down_callstack - Move one callstack down.
+K         : up_callstack   - Move one callstack up.
+s         : show_function  - Show the current function's source code and set breakpoints.
+S         : show_file      - Show the current file's source code and set breakpoints.
+t         : stack          - Show all frames in all callstacks and interactively scroll through them.
+p         : print          - Prints the value of a variable.
+e         : edit           - Open the current function in your $EDITOR.
+i         : interpret      - Open a Python interpreter in the current frame.
+v         : visibility     - Toggles skipping hidden frames in other commands.
+escape+d/c: continue       - Close the debugger and continue the program.
+q         : quit           - Quit the whole Python program.
+?         : help           - Display a list of all debugger commands.
 ```
 
 Here, a "callstack" refers to all of the frames in the traceback of a single exception, so e.g. `J` moves down to a nested exception.
+
+`show_function`/`show_file`/`stack` all offer interactive interfaces, the rest of the commands return to the REPL immediately.
 
 ## Configuration
 
@@ -115,12 +117,11 @@ The built-in debugger is called `pdb`, and my name is Patrick! 😁
 
 ##### `pdb`/`pdb++`?
 
-We offer syntax highlighting; nested exceptions; interacting with hidden frames; everything discussed above.  
-However we don't offer line-by-line evaluation. (I almost never find it useful, as compared to just inserting breakpoints. Especially in complicated programs.)
+We offer syntax highlighting; nested exceptions; interacting with hidden frames; a hybrid TUI/REPL interface rather than pure-REPL.
 
 ##### `ipdb`?
 
-Similar to `pdb`: we offer a more concise set of commands and a more responsive interface. We also handle nested exceptions. We don't offer line-by-line-evaluation.
+Same as for `pdb`, except that `ipdb` does support syntax highlighting and hidden frames.
 
 ##### `pudb`?
 
@@ -163,10 +164,10 @@ Set `PATDB_EDITOR` as discussed in the configuration above.
 When `p`rinting or `i`nteracting then the current exception is available as `__exception__` and the current frame is available as `__frame__`.
 </details>
 <details>
-<summary>Investigating an existing exception or traceback object.</summary>
+<summary>Investigating an existing exception, traceback, or frame object.</summary>
 <br>
 
-Call either `patdb.debug(some_exception)` or `patdb.debug(some_traceback)` if you have a particular exception/traceback that you'd like to investigate.
+Call either `patdb.debug(some_exception)` or `patdb.debug(some_traceback)` or `patdb.debug(some_frame)` if you have a particular exception/traceback/frame that you'd like to investigate. Exceptions may potentially have multiple callstacks (subexceptions via `__cause__` and `__context__` are checked, with one callstack for each exception), the others will enable debugging of a single callstack.
 </details>
 <details>
 <summary>Setting <code>sys.excepthook</code>.</summary>

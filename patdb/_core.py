@@ -1,11 +1,14 @@
 import bdb
 import builtins
 import collections as co
+import contextlib
 import dataclasses
 import enum
 import functools as ft
+import gc
 import importlib.machinery
 import inspect
+import operator
 import os
 import pathlib
 import pprint
@@ -120,12 +123,32 @@ class _KeyConfig:
         return os.getenv("PATDB_KEY_UP_CALLSTACK", "K")
 
     @ft.cached_property
+    def key_down_line(self) -> str:
+        return os.getenv("PATDB_KEY_DOWN_LINE", "j")
+
+    @ft.cached_property
+    def key_up_line(self) -> str:
+        return os.getenv("PATDB_KEY_UP_LINE", "k")
+
+    @ft.cached_property
     def key_show_function(self) -> str:
         return os.getenv("PATDB_KEY_SHOW_FUNCTION", "s")
 
     @ft.cached_property
     def key_show_file(self) -> str:
         return os.getenv("PATDB_KEY_SHOW_FILE", "S")
+
+    @ft.cached_property
+    def key_show_down_call(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_DOWN_CALL", "J")
+
+    @ft.cached_property
+    def key_show_select(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_SELECT", "s/S")
+
+    @ft.cached_property
+    def key_show_leave(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_LEAVE", "q")
 
     @ft.cached_property
     def key_stack(self) -> str:
@@ -339,7 +362,7 @@ def _echo_later_lines(x: str):
 
 
 def _echo_newline_end_command():
-    click.echo("")
+    click.secho("", reset=True)
 
 
 #
@@ -360,6 +383,10 @@ class ExcThread(threading.Thread):
 #
 # Managing callstacks and frames
 #
+
+
+def _null_trace(_, __, ___):
+    pass
 
 
 # Pairing the frame object with the traceback `tb.tb_lineno`.
@@ -397,7 +424,7 @@ class _Frame:
         except OSError:
             return None
         else:
-            return lines
+            return [line.rstrip() for line in lines]
 
     @ft.cache  # Cache result in case we modify the file via `(e)dit`.
     def get_file_source(self) -> Optional[tuple[str, str]]:
@@ -410,6 +437,77 @@ class _Frame:
             return filename, source
         else:
             return None
+
+    def cache(self):
+        self.get_function_source()
+        self.get_file_source()
+
+    def set_trace(
+        self, line_num: int, trace_hooks: Optional[list[Callable[[], None]]]
+    ) -> Union[Callable[[], None], str]:
+        # This function is unfortunately side-effect'ing. It will set a trace function
+        # on the relevant frame.
+
+        if sys.gettrace() not in {None, _null_trace}:
+            return (
+                "The Python runtime already has a global trace function enabled, "
+                "perhaps from some other tool? Cannot jump to other frames."
+            )
+        if self._frame.f_trace is not None:
+            return (
+                "This frame already has a local trace function enabled, perhaps "
+                "from some other tool? Cannot jump to it."
+            )
+
+        # Avoid closing over `self` and keeping it in memory unnecessarily: these trace
+        # hooks may outlive our `patdb.debug` call.
+        self_frame = self._frame
+        del self
+
+        def _trace(frame: types.FrameType, event: str, arg):
+            del frame, arg
+            if event == "line" and self_frame.f_lineno == line_num:
+                if sys.gettrace() is _null_trace:
+                    sys.settrace(None)
+                else:
+                    click.echo(
+                        "Warning: some tool (other than `patdb`) has set "
+                        "`sys.settrace` whilst jumping between frames. The other "
+                        "tool's global trace function has been left in place, but "
+                        "nonetheless you may see unexpected behaviour."
+                    )
+                if trace_hooks is None:
+                    _uninstall_local_trace()
+                else:
+                    # In particular this is useful when you have made multiple calls to
+                    # `.set_trace` on multiple frames, and want to uninstall all of them
+                    # as soon as one of them is triggered.
+                    for hook in trace_hooks:
+                        hook()
+                debug(self_frame)
+
+        def _uninstall_local_trace():
+            if self_frame.f_trace is _trace:
+                self_frame.f_trace = None
+                self_frame.f_trace_lines = False
+            else:
+                # E.g. if another tool grabs `frame.f_trace` and wraps it.
+                click.echo(
+                    "Warning: some tool (other than `patdb`) has set `frame.f_trace` "
+                    "whilst jumping frames. You may see unexpected behaviour. The "
+                    "other tool's local trace function has been left in place, but "
+                    "nonetheless you may see unexpected behaviour."
+                )
+
+        # We need to install a global trace hook, otherwise the local trace hooks will
+        # not be checked.
+        # "Note that in order for this to work, a global tracing function must have been
+        # installed with settrace()"
+        # https://docs.python.org/3/library/sys.html#sys.settrace
+        sys.settrace(_null_trace)
+        self_frame.f_trace = _trace
+        self_frame.f_trace_lines = True
+        return _uninstall_local_trace
 
 
 class _CallstackKind(enum.Enum):
@@ -448,6 +546,21 @@ class _Callstack:
         return " + ".join(
             kind.name for kind in sorted(self.kinds, key=lambda kind: kind.value)
         )
+
+
+def _next_call_trace(done_cell: list[bool], frame: types.FrameType, event: str, arg):
+    del arg
+    if event == "call" and done_cell[0]:
+        trace = sys.gettrace()
+        if type(trace) is ft.partial and trace.func is _next_call_trace:
+            sys.settrace(None)
+            debug(frame)
+        else:
+            click.echo(
+                "Warning: some tool (other than `patdb`) has set `sys.settrace` whilst "
+                "jumping between frames. The other tool's global trace function has "
+                "been left in place, but nonetheless you may see unexpected behaviour."
+            )
 
 
 def _get_callstacks_from_error(
@@ -659,8 +772,9 @@ class _State:
     done: bool
     skip_hidden: bool
     location: _Location
+    done_cell: list[bool]
     print_history: prompt_toolkit.history.InMemoryHistory
-    helpmsg: str
+    helpmsg: Callable[[], str]
     root_callstack: _Callstack
     depth: Optional[int]
     modified_files: frozenset[pathlib.Path]
@@ -800,6 +914,97 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
 #
 # Implementations for the REPL and its commands
 #
+
+
+def _format_text_for_basic_app(
+    text: list[str],
+) -> list[prompt_toolkit.formatted_text.OneStyleAndTextTuple]:
+    formatted_text: list[prompt_toolkit.formatted_text.OneStyleAndTextTuple] = [
+        ("[ZeroWidthEscape]", "\r")
+    ]
+    for line in text:
+        formatted_text.append(("[ZeroWidthEscape]", "\x1b[2K"))  # erase entire line
+        formatted_text.append(("[ZeroWidthEscape]", line))
+        # fill background + move cursor to right edge of screen: the newline doesn't get
+        # the background colour for some reason, so we punt it to the right edge of the
+        # screen.
+        formatted_text.append(("[ZeroWidthEscape]", "\x1b[K\x1b[1000C"))
+        formatted_text.append(("", "\n"))  # separate so the last one can be popped.
+    if len(text) > 0:
+        formatted_text.pop()
+    return formatted_text
+
+
+def _basic_app(
+    initial_carry: _Carry,
+    display: Callable[[_Carry], list[str]],
+    key_mapping: dict[
+        Callable[[_Carry], tuple[_Carry, bool]], tuple[str, Optional[str]]
+    ],
+    depth: Optional[int],
+) -> _Carry:
+    carry = initial_carry
+
+    new_key_mapping = {}
+    for k, v in key_mapping.items():
+
+        @ft.wraps(k)
+        def new_k(event, k=k):
+            nonlocal carry
+            carry, done = k(carry)
+            event.app.layout.container.content.text = _format_text_for_basic_app(
+                display(carry)
+            )
+            event.app.reset()
+            if done:
+                event.app.exit()
+
+        new_key_mapping[new_k] = v
+    del key_mapping
+
+    key_bindings, fn_keys, errors = _make_key_bindings(
+        {k: v for k, (v, _) in new_key_mapping.items()}, depth
+    )
+    for error in errors:
+        _echo_later_lines(error)
+
+    container = prompt_toolkit.layout.containers.Window(
+        content=prompt_toolkit.layout.controls.FormattedTextControl(
+            text=_format_text_for_basic_app(display(initial_carry)), show_cursor=False
+        ),
+        wrap_lines=True,
+        # For some reason we need a dummy style here to get this to print correctly.
+        style="class:foo",
+    )
+    layout = prompt_toolkit.layout.Layout(container)
+    output = prompt_toolkit.output.create_output()
+    if hasattr(output, "enable_cpr"):
+        output.enable_cpr = False  # pyright: ignore[reportAttributeAccessIssue]
+    app = prompt_toolkit.Application(
+        full_screen=False,
+        layout=layout,
+        key_bindings=key_bindings,
+        include_default_pygments_style=False,
+        output=output,
+    )
+    infos = ["Press "]
+    for i, (command, (_, info)) in enumerate(new_key_mapping.items()):
+        keys = "/".join(fn_keys[command])
+        infos.append(keys)
+        if info is None:
+            infos.append(", ")
+        else:
+            infos.append(f" {info}")
+            if i == len(new_key_mapping) - 1:
+                infos.append(".")
+            else:
+                infos.append("; ")
+    _echo_later_lines(_patdb_info("".join(infos), depth))
+    click.echo("")
+    t = threading.Thread(target=app.run)
+    t.start()
+    t.join()
+    return carry
 
 
 # Note that we must not cache the result of this function, as else nested `patdb`
@@ -1062,27 +1267,14 @@ def _format_callstack(
             yield f"  {final_indent} {e_lines[-1]}", False
 
 
-def _format_callstack_windowed(
+def _format_callstacks(
     root_callstack: _Callstack,
     interactive_location: _Location,
     current_location: _Location,
     is_collapsed: Callable[[_Callstack], bool],
     skip_hidden: bool,
     short: bool,
-) -> list[prompt_toolkit.formatted_text.OneStyleAndTextTuple]:
-    """Builds the text that is displayed by the `_s(t)ack` command."""
-
-    # First get the terminal height to figure out the maximum amount of text we actually
-    # want to output. We reduce it just so that we don't take up all the screen real
-    # estate, which can be a bit much otherwise.
-    terminal_height = max(1, 2 * shutil.get_terminal_size().lines // 3)
-    # We'll store our outputs in a deque, which will efficiently drop earlier outputs
-    # that we don't actually want to keep.
-    outs = co.deque(maxlen=terminal_height)
-    # We'll want to stop iterating once we get a certain amount past the stack our `>`
-    # interaction marker is currently at.
-    its_the_final_countdown: Optional[int] = None
-
+) -> Iterator[tuple[str, bool]]:
     carry = ("│", "│", "╵", _CallstackNesting.only)
 
     def update_indent(
@@ -1126,72 +1318,167 @@ def _format_callstack_windowed(
             nesting,
         )
 
-    first_line = None
     for callstack_info_iterable in _callstack_iter(
         root_callstack, carry, update_indent, callstack_info
     ):
         for line, is_interactive in callstack_info_iterable:
-            if first_line is None:
-                first_line = line
-            if its_the_final_countdown is not None:
-                its_the_final_countdown -= 1
-                if its_the_final_countdown < 0:
-                    break
-            outs.append(("[ZeroWidthEscape]", line))
-            if is_interactive:
-                assert its_the_final_countdown is None
-                its_the_final_countdown = max(
-                    terminal_height - len(outs), terminal_height // 2
-                )
-
-    if outs[0][1] is not first_line:
-        outs[0] = ("[ZeroWidthEscape]", "  │ ...")
-    assert its_the_final_countdown is not None
-    if its_the_final_countdown < 0:
-        outs[-1] = ("[ZeroWidthEscape]", "  │ ...")
-
-    new_outs: list[tuple[str, str]] = []
-    for line in outs:
-        new_outs.append(("[ZeroWidthEscape]", "\n\x1b[2K"))
-        new_outs.append(line)
-    new_outs[0] = ("[ZeroWidthEscape]", "\r\x1b[2K")
-    return list(new_outs)
+            yield line, is_interactive
 
 
-def _format_source(source: str, first_line_num: int, highlight_line_num: int) -> str:
+def _window_text(iterator: Iterator[tuple[str, bool]], ellipsis: str) -> list[str]:
+    """Builds the text that is displayed by the `_s(t)ack` command."""
+
+    # First get the terminal height to figure out the maximum amount of text we actually
+    # want to output. We reduce it just so that we don't take up all the screen real
+    # estate, which can be a bit much otherwise.
+    terminal_height = max(1, 2 * shutil.get_terminal_size().lines // 3)
+    # We'll store our outputs in a deque, which will efficiently drop earlier outputs
+    # that we don't actually want to keep.
+    outs = co.deque(maxlen=terminal_height)
+    # We'll want to stop iterating once we get a certain amount past the stack our `>`
+    # interaction marker is currently at.
+    its_the_final_countdown: Optional[int] = None
+
+    first_line = None
+    for line, is_interactive in iterator:
+        if first_line is None:
+            first_line = line
+        if its_the_final_countdown is not None:
+            its_the_final_countdown -= 1
+            if its_the_final_countdown < 0:
+                break
+        outs.append(line)
+        if is_interactive:
+            assert its_the_final_countdown is None
+            its_the_final_countdown = max(
+                terminal_height - len(outs), terminal_height // 2
+            )
+
+    if outs[0] is not first_line:
+        outs[0] = ellipsis
+    if its_the_final_countdown is not None and its_the_final_countdown < 0:
+        # We should never have `its_the_final_countdown is None` in well-formed input
+        # data: in particular, line numbers should always be valid.
+        # In practice there's nothing really stopping you from creating frames or
+        # tracebacks with completely arbitrary line numbers! That might mean our
+        # iterators never find the interactive line, so that `is_interactive` is always
+        # `False`, and so `its_the_final_countdown` is never set. In order to be robust
+        # to such wacky hackery, we do at the least just not error out in this case.
+        outs[-1] = ellipsis
+    return list(outs)
+
+
+@dataclasses.dataclass(frozen=True)
+class _StackState:
+    location: _Location
+    skip_hidden: bool
+    update_location: bool
+    short_error: bool
+    is_callstack_collapsed: dict
+
+
+def _format_source(
+    source: str, first_line_num: int, current_line_num: int, interactive_line_num: int
+) -> Iterator[tuple[str, bool]]:
     syntax_split = _syntax_highlight(source.replace("\t", "    ")).split("\n")
 
     max_line_num = first_line_num + len(syntax_split) - 1
     len_num = len(str(max_line_num))
 
-    outs = []
     _colour_lookup = ft.cache(_hex_to_rgb)
     for i, syntax_i in enumerate(syntax_split):
         num = i + first_line_num
-        if num == highlight_line_num:
+        if num == current_line_num:
             fg_ln = _colour_lookup(_PygmentsStyle.line_number_special_color)
             bg_ln = _colour_lookup(_PygmentsStyle.line_number_special_background_color)
             bg_line = _colour_lookup(_PygmentsStyle.highlight_color)
-            arrow = click.style("-> ", bg=bg_line, reset=False)
+            arrow1 = click.style("-", bg=bg_line, reset=False)
         else:
             fg_ln = _colour_lookup(_PygmentsStyle.line_number_color)
             bg_ln = _colour_lookup(_PygmentsStyle.line_number_background_color)
             bg_line = _colour_lookup(_PygmentsStyle.background_color)
-            arrow = click.style("   ", bg=bg_line, reset=False)
+            arrow1 = click.style(" ", bg=bg_line, reset=False)
+        is_interactive = num == interactive_line_num
+        if is_interactive:
+            arrow2 = click.style(">", bg=bg_line, reset=False)
+        else:
+            arrow2 = click.style(" ", bg=bg_line, reset=False)
         ln = click.style(f"{{:{len_num}}}".format(num), fg=fg_ln, bg=bg_ln, reset=False)
         line = click.style(syntax_i, bg=bg_line, reset=False)
-        outs.append(arrow)
-        outs.append(ln)
-        outs.append(line)
-        # The \x1b[K clear-to-end-of-line code is needed to fill in the background
-        # correctly, at least for me. (macOS + iTerm2 + tmux)
-        outs.append(" \x1b[K")
-        # Must be a separate `.append` to the above, as below we overwrite this entry on
-        # the final line.
-        outs.append("\n")
-    if len(outs) != 0:
-        outs[-1] = click.style("", reset=True)  # Remove final newline
-    return "".join(outs)
+        yield f"{arrow1}{arrow2}{ln}{line}", is_interactive
+
+
+def _show_source(
+    source: list[str], first_line_num: int, current_line_num: int, depth: Optional[int]
+) -> tuple[Optional[int], bool]:
+    joined_source = "\n".join(source)
+    last_line_num = first_line_num + len(source) - 1
+    fg_ln = _hex_to_rgb(_PygmentsStyle.line_number_color)
+    bg_ln = _hex_to_rgb(_PygmentsStyle.line_number_background_color)
+    bg_line = _hex_to_rgb(_PygmentsStyle.background_color)
+
+    def _display(carry: tuple[Optional[int], bool]) -> list[str]:
+        interactive_line_num, _ = carry
+        if interactive_line_num is None:
+            interactive_line_num = current_line_num
+        return _window_text(
+            _format_source(
+                joined_source, first_line_num, current_line_num, interactive_line_num
+            ),
+            ellipsis=click.style("  ", bg=bg_line)
+            + click.style("...", fg=fg_ln, bg=bg_ln)
+            + click.style("", bg=bg_line, reset=False),
+        )
+
+    def _up_line(
+        carry: tuple[Optional[int], bool],
+    ) -> tuple[tuple[Optional[int], bool], bool]:
+        interactive_line_num, _ = carry
+        assert interactive_line_num is not None
+        return (max(first_line_num, interactive_line_num - 1), False), False
+
+    def _down_line(
+        carry: tuple[Optional[int], bool],
+    ) -> tuple[tuple[Optional[int], bool], bool]:
+        interactive_line_num, _ = carry
+        assert interactive_line_num is not None
+        return (min(last_line_num, interactive_line_num + 1), False), False
+
+    def _show_down_call(
+        carry: tuple[Optional[int], bool],
+    ) -> tuple[tuple[Optional[int], bool], bool]:
+        del carry
+        return (None, True), True
+
+    def _show_select(
+        carry: tuple[Optional[int], bool],
+    ) -> tuple[tuple[Optional[int], bool], bool]:
+        interactive_line_num, _ = carry
+        assert interactive_line_num is not None
+        return (interactive_line_num, True), True
+
+    def _show_leave(
+        carry: tuple[Optional[int], bool],
+    ) -> tuple[tuple[Optional[int], bool], bool]:
+        interactive_line_num, _ = carry
+        assert interactive_line_num is not None
+        return (interactive_line_num, False), True
+
+    key_mapping = {
+        _down_line: (_config.key_down_line, None),
+        _up_line: (_config.key_up_line, "to scroll"),
+        _show_down_call: (
+            _config.key_show_down_call,
+            "to resume execution until the next function call",
+        ),
+        _show_select: (
+            _config.key_show_select,
+            "to resume execution until the selected line",
+        ),
+        _show_leave: (_config.key_show_leave, "to leave show mode"),
+    }
+
+    return _basic_app((current_line_num, False), _display, key_mapping, depth)
 
 
 def _update_and_display_move(
@@ -1223,14 +1510,16 @@ def _update_and_display_move(
             source_line = "<no source found>"
         else:
             index = frame.line - frame.f_code.co_firstlineno
-            if index < 0:
+            try:
+                source_line = source_lines[index]
+            except IndexError:
                 # I don't know if this is ever possible, but just in case.
                 source_line = "<no source found>"
             else:
-                source_line = _format_source(
-                    source_lines[index].rstrip(), frame.line, frame.line
+                [(source_line, _)] = _format_source(
+                    source_line, frame.line, frame.line, frame.line
                 )
-        _echo_later_lines(source_line)
+        _echo_later_lines(source_line + "\x1b[K")
     _echo_newline_end_command()
     return state
 
@@ -1259,6 +1548,18 @@ def _make_namespaces(state: _State) -> tuple[dict[str, Any], dict[str, Any]]:
     return globals, locals
 
 
+def _apply_to_frames_with_path(
+    root_callstack: _Callstack, filepath: pathlib.Path, fn: Callable[[_Frame], None]
+):
+    agenda = [root_callstack]
+    while len(agenda) > 0:
+        callstack = agenda.pop()
+        agenda.extend(callstack.down_callstacks)
+        for frame in callstack.frames:
+            if pathlib.Path(frame.f_code.co_filename).resolve() == filepath:
+                fn(frame)
+
+
 def _subprocess_edit(
     cmd: list[str],
     root_callstack: _Callstack,
@@ -1267,17 +1568,9 @@ def _subprocess_edit(
     depth: Optional[int],
     is_modified: bool,
 ) -> tuple[int, bool]:
-    filesource = filepath.read_bytes()
-    agenda = [root_callstack]
-    while len(agenda) > 0:
-        callstack = agenda.pop()
-        agenda.extend(callstack.down_callstacks)
-        for frame in callstack.frames:
-            if pathlib.Path(frame.f_code.co_filename).resolve() == filepath:
-                # Cache the source for all frames using this file, before we potentially
-                # modify the file.
-                frame.get_function_source()
-                frame.get_file_source()
+    # Cache the source for all frames using this file, before we potentially modify the
+    # file.
+    _apply_to_frames_with_path(root_callstack, filepath, operator.methodcaller("cache"))
     if is_modified:
         _echo_later_lines(
             _patdb_info(
@@ -1289,6 +1582,7 @@ def _subprocess_edit(
             )
         )
         click.getchar()
+    filesource = filepath.read_bytes()
     try:
         result = subprocess.run(cmd)
     except Exception as e:
@@ -1312,14 +1606,39 @@ def _make_help(fn_keys):
     for fn, keys in fn_keys.items():
         key_len = max(key_len, sum(map(len, keys)) + len(keys) - 1)
         name_len = max(name_len, len(_fn_to_name(fn)))
-    template = f"{{:{key_len}}}: {{:{name_len}}} - {{}}"
+    template = f"{{:{key_len}}}: {{:{name_len}}} - "
+    name_width = len(template.format("", ""))
+    doc_width = shutil.get_terminal_size().columns - name_width
     helpmsg = []
     for fn, keys in fn_keys.items():
         name = _fn_to_name(fn)
-        doc = fn.__doc__.split("\n")[0]
-        helpmsg.append(template.format("/".join(keys), name, doc))
+        doc = fn.__doc__.split("\n")[0].strip()
+        if doc_width < 10:
+            # In this case give up and just wrap all text.
+            helpmsg.append(template.format("/".join(keys), name) + doc)
+        else:
+            doc_lines = textwrap.wrap(doc, doc_width)
+            first_doc_line, *later_doc_lines = doc_lines
+            helpmsg.append(template.format("/".join(keys), name) + first_doc_line)
+            for line in later_doc_lines:
+                helpmsg.append(" " * name_width + line)
     helpmsg = "\n".join(helpmsg)
     return helpmsg
+
+
+@contextlib.contextmanager
+def _depth_context(depth: Optional[int]):
+    if depth is None:
+        _config.depth = 1
+    else:
+        _config.depth = depth + 1
+    try:
+        yield
+    finally:
+        if depth is None:
+            del _config.depth
+        else:
+            _config.depth = depth
 
 
 #
@@ -1404,7 +1723,9 @@ def _up_callstack(state: _State) -> _State:
 
 
 def _show_function(state: _State) -> _State:
-    """Show the current function's source code."""
+    """Show the current function's source code and set breakpoints."""  # noqa: E501
+    # noqa as we grab the first line of the docstring for our help messages, so we don't
+    # want to wrap it.
     frame = _current_frame(state.location)
     if isinstance(frame, str):
         _echo_first_line(frame)
@@ -1413,12 +1734,31 @@ def _show_function(state: _State) -> _State:
         if lines is None:
             _echo_first_line("<no source found>")
         else:
-            outs = _format_source(
-                "".join(lines).rstrip(), frame.f_code.co_firstlineno, frame.line
+            # i.e. we're on the bottom frame
+            jump_line_num, should_jump = _show_source(
+                lines, frame.f_code.co_firstlineno, frame.line, state.depth
             )
-            _echo_later_lines(outs)
-            _echo_later_lines(f"Currently on line {frame.line}.")
-    _echo_newline_end_command()
+            if should_jump and jump_line_num != frame.line:
+                if jump_line_num is None:
+                    # Jump inside the next call
+                    if sys.gettrace() is None:
+                        sys.settrace(ft.partial(_next_call_trace, state.done_cell))
+                        state = dataclasses.replace(state, done=True)
+                    else:
+                        _echo_first_line(
+                            "The Python runtime already has a global trace function "
+                            "enabled, perhaps from some other tool? Cannot jump to "
+                            "other frames."
+                        )
+                        _echo_newline_end_command()
+                else:
+                    # Jump to a higher stack frame.
+                    result = frame.set_trace(jump_line_num, None)
+                    if callable(result):
+                        state = dataclasses.replace(state, done=True)
+                    else:
+                        _echo_first_line(result)
+                        _echo_newline_end_command()
     return state
 
 
@@ -1426,7 +1766,7 @@ def _show_function(state: _State) -> _State:
 # which we can scroll through the file or jump to where we are in it. For that there is
 # `(e)dit`. (Honestly this command isn't super useful, just because `(e)dit` exists.)
 def _show_file(state: _State) -> _State:
-    """Show the current file's source code."""
+    """Show the current file's source code and set breakpoints."""  # noqa: E501
     frame = _current_frame(state.location)
     if isinstance(frame, str):
         _echo_first_line(frame)
@@ -1437,15 +1777,41 @@ def _show_file(state: _State) -> _State:
         else:
             filepath, source = filepath__source
             _echo_first_line(_bold(filepath))
-            outs = _format_source(source, 1, frame.line)
-            _echo_later_lines(outs)
-            _echo_later_lines(f"Currently on line {frame.line}.")
-    _echo_newline_end_command()
+            jump_line_num, should_jump = _show_source(
+                source.splitlines(), 1, frame.line, state.depth
+            )
+            assert jump_line_num is not None
+            if should_jump and jump_line_num != frame.line:
+                # This is a bit finickity. We set `frame.f_trace` for every frame that
+                # uses this file. We additionally need all of the trace functions to
+                # have references to all of the other trace functions, so that as soon
+                # as one of them is called, they can all be uninstalled. As such we keep
+                # a a list of hooks, which is mutated in-place, to tie the knot.
+                uninstall_hooks = []
+                errors = []
+
+                def set_trace(frame: _Frame):
+                    result = frame.set_trace(jump_line_num, uninstall_hooks)
+                    if callable(result):
+                        uninstall_hooks.append(result)
+                    else:
+                        errors.append(result)
+
+                _apply_to_frames_with_path(
+                    state.root_callstack, pathlib.Path(filepath).resolve(), set_trace
+                )
+                if len(errors) == 0:
+                    state = dataclasses.replace(state, done=True)
+                else:
+                    _echo_first_line("\n".join(errors))
+                    _echo_newline_end_command()
+                    for hook in uninstall_hooks:
+                        hook()
     return state
 
 
 def _stack(state: _State) -> _State:
-    """Scroll through all frames in all callstacks."""
+    """Show all frames in all callstacks and interactively scroll through them."""
 
     # Note that we have deliberately not added many other commands here!
     #
@@ -1462,179 +1828,142 @@ def _stack(state: _State) -> _State:
     # What about e.g. opening an interpreter below, you ask? Well then, just press `c`
     # and then `i`!
 
-    location = state.location
-    skip_hidden = state.skip_hidden
-    update_location = False
-    short_error = False
-    is_callstack_collapsed = {
-        callstack: callstack.collapse_default
-        for callstack in _callstack_iter(
-            state.root_callstack,
-            None,
-            lambda carry, _: carry,
-            lambda callstack, _: callstack,
+    initial_stack_state = _StackState(
+        state.location,
+        state.skip_hidden,
+        update_location=False,
+        short_error=False,
+        is_callstack_collapsed={
+            callstack: callstack.collapse_default
+            for callstack in _callstack_iter(
+                state.root_callstack,
+                None,
+                lambda carry, _: carry,
+                lambda callstack, _: callstack,
+            )
+        },
+    )
+
+    def _is_collapsed(stack_state: _StackState, callstack: _Callstack):
+        return stack_state.is_callstack_collapsed[callstack]
+
+    def _display(stack_state: _StackState) -> list[str]:
+        return _window_text(
+            _format_callstacks(
+                state.root_callstack,
+                stack_state.location,
+                state.location,
+                ft.partial(_is_collapsed, stack_state),
+                stack_state.skip_hidden,
+                stack_state.short_error,
+            ),
+            ellipsis="  │ ...",
         )
-    }
 
-    def _is_collapsed(callstack: _Callstack):
-        return is_callstack_collapsed[callstack]
+    def _down_frame(stack_state: _StackState) -> tuple[_StackState, bool]:
+        if _is_collapsed(stack_state, stack_state.location.callstack):
+            return stack_state, False
+        else:
+            move = _move_frame(
+                stack_state.location,
+                skip_hidden=stack_state.skip_hidden,
+                down=True,
+                include_current_location=False,
+            )
+            return dataclasses.replace(stack_state, location=move.location), False
 
-    def _update(move):
-        nonlocal location
-        location = move.location
+    def _up_frame(stack_state: _StackState) -> tuple[_StackState, bool]:
+        if _is_collapsed(stack_state, stack_state.location.callstack):
+            return stack_state, False
+        else:
+            move = _move_frame(
+                stack_state.location,
+                skip_hidden=stack_state.skip_hidden,
+                down=False,
+                include_current_location=False,
+            )
+            return dataclasses.replace(stack_state, location=move.location), False
 
-    def _display(event):
-        text = _format_callstack_windowed(
-            state.root_callstack,
-            location,
-            state.location,
-            _is_collapsed,
-            skip_hidden,
-            short_error,
-        )
-        event.app.layout.container.content.text = text
-        event.app.reset()
-
-    def _down_frame(event):
-        if _is_collapsed(location.callstack):
-            return
-        move = _move_frame(
-            location, skip_hidden=skip_hidden, down=True, include_current_location=False
-        )
-        _update(move)
-        _display(event)
-
-    def _up_frame(event):
-        if _is_collapsed(location.callstack):
-            return
-        move = _move_frame(
-            location,
-            skip_hidden=skip_hidden,
-            down=False,
-            include_current_location=False,
-        )
-        _update(move)
-        _display(event)
-
-    def _down_callstack(event):
+    def _down_callstack(stack_state: _StackState) -> tuple[_StackState, bool]:
         move = _move_callstack(
             state.root_callstack,
-            location,
-            skip_hidden,
+            stack_state.location,
+            stack_state.skip_hidden,
             down=True,
         )
-        _update(move)
-        _display(event)
+        return dataclasses.replace(stack_state, location=move.location), False
 
-    def _up_callstack(event):
+    def _up_callstack(stack_state: _StackState) -> tuple[_StackState, bool]:
         move = _move_callstack(
             state.root_callstack,
-            location,
-            skip_hidden,
+            stack_state.location,
+            stack_state.skip_hidden,
             down=False,
         )
-        _update(move)
-        _display(event)
+        return dataclasses.replace(stack_state, location=move.location), False
 
-    def _visibility(event):
-        nonlocal skip_hidden
-        skip_hidden = not skip_hidden
-        _display(event)
+    def _visibility(stack_state: _StackState) -> tuple[_StackState, bool]:
+        return dataclasses.replace(
+            stack_state, skip_hidden=not stack_state.skip_hidden
+        ), False
 
-    def _toggle_error(event):
-        nonlocal short_error
-        short_error = not short_error
-        _display(event)
+    def _toggle_error(stack_state: _StackState) -> tuple[_StackState, bool]:
+        return dataclasses.replace(
+            stack_state, short_error=not stack_state.short_error
+        ), False
 
-    def _toggle_collapse_single(event):
-        is_callstack_collapsed[location.callstack] = not _is_collapsed(
-            location.callstack
+    def _toggle_collapse_single(stack_state: _StackState) -> tuple[_StackState, bool]:
+        is_callstack_collapsed = stack_state.is_callstack_collapsed.copy()
+        is_callstack_collapsed[stack_state.location.callstack] = not _is_collapsed(
+            stack_state, stack_state.location.callstack
         )
-        _display(event)
+        return dataclasses.replace(
+            stack_state, is_callstack_collapsed=is_callstack_collapsed
+        ), False
 
-    def _toggle_collapse_all(event):
-        if all(is_callstack_collapsed.values()):
-            for key in is_callstack_collapsed.keys():
-                is_callstack_collapsed[key] = False
-        else:
-            for key in is_callstack_collapsed.keys():
-                is_callstack_collapsed[key] = True
-        _display(event)
+    def _toggle_collapse_all(stack_state: _StackState) -> tuple[_StackState, bool]:
+        value = not all(stack_state.is_callstack_collapsed.values())
+        is_callstack_collapsed = stack_state.is_callstack_collapsed.copy()
+        for key in is_callstack_collapsed.keys():
+            is_callstack_collapsed[key] = value
+        return dataclasses.replace(
+            stack_state, is_callstack_collapsed=is_callstack_collapsed
+        ), False
 
-    def _stack_select(event):
-        nonlocal update_location
-        update_location = True
-        event.app.exit()
+    def _stack_select(stack_state: _StackState) -> tuple[_StackState, bool]:
+        return dataclasses.replace(stack_state, update_location=True), True
 
-    def _stack_leave(event):
-        event.app.exit()
+    def _stack_leave(stack_state: _StackState) -> tuple[_StackState, bool]:
+        return stack_state, True
 
     key_mapping = {
-        _down_frame: _config.key_down_frame,
-        _up_frame: _config.key_up_frame,
-        _down_callstack: _config.key_down_callstack,
-        _up_callstack: _config.key_up_callstack,
-        _visibility: _config.key_visibility,
-        _toggle_error: _config.key_toggle_error,
-        _toggle_collapse_single: _config.key_toggle_collapse_single,
-        _toggle_collapse_all: _config.key_toggle_collapse_all,
-        _stack_select: _config.key_stack_select,
-        _stack_leave: _config.key_stack_leave,
-    }
-    key_bindings, fn_keys, errors = _make_key_bindings(key_mapping, state.depth)
-    for error in errors:
-        _echo_later_lines(error)
-    text = _format_callstack_windowed(
-        state.root_callstack,
-        location,
-        state.location,
-        _is_collapsed,
-        skip_hidden,
-        short_error,
-    )
-
-    container = prompt_toolkit.layout.containers.Window(
-        content=prompt_toolkit.layout.controls.FormattedTextControl(
-            text=text, show_cursor=False
+        _down_frame: (_config.key_down_frame, None),
+        _up_frame: (_config.key_up_frame, None),
+        _down_callstack: (_config.key_down_callstack, None),
+        _up_callstack: (_config.key_up_callstack, "to scroll"),
+        _visibility: (_config.key_visibility, "to show/hide error messages"),
+        _toggle_error: (_config.key_toggle_error, "to show/hide hidden frames"),
+        _toggle_collapse_single: (
+            _config.key_toggle_collapse_single,
+            "to show/hide a callstack",
         ),
-        wrap_lines=True,
-        # For some reason we need a dummy style here to get this to print correctly.
-        style="class:foo",
+        _toggle_collapse_all: (
+            _config.key_toggle_collapse_all,
+            "to show/hide every callstack",
+        ),
+        _stack_select: (_config.key_stack_select, "to switch to a frame"),
+        _stack_leave: (_config.key_stack_leave, "to leave stack mode"),
+    }
+    final_stack_state = _basic_app(
+        initial_stack_state, _display, key_mapping, state.depth
     )
-    layout = prompt_toolkit.layout.Layout(container)
-    output = prompt_toolkit.output.create_output()
-    if hasattr(output, "enable_cpr"):
-        output.enable_cpr = False  # pyright: ignore[reportAttributeAccessIssue]
-    app = prompt_toolkit.Application(
-        full_screen=False,
-        layout=layout,
-        key_bindings=key_bindings,
-        include_default_pygments_style=False,
-        output=output,
-    )
-    _echo_later_lines(
-        _patdb_info(
-            f"Press "
-            f"{'/'.join(fn_keys[_down_frame])}, "
-            f"{'/'.join(fn_keys[_up_frame])}, "
-            f"{'/'.join(fn_keys[_down_callstack])}, "
-            f"{'/'.join(fn_keys[_up_callstack])} to scroll; "
-            f"{'/'.join(fn_keys[_toggle_error])} to show/hide error messages; "
-            f"{'/'.join(fn_keys[_visibility])} to show/hide hidden frames; "
-            f"{'/'.join(fn_keys[_toggle_collapse_single])} to show/hide a callstack; "
-            f"{'/'.join(fn_keys[_toggle_collapse_all])} to show/hide every callstack; "
-            f"{'/'.join(fn_keys[_stack_select])} to switch to a frame; "
-            f"{'/'.join(fn_keys[_stack_leave])} to leave stack mode without switching."
-            "\n",
-            state.depth,
+    if final_stack_state.update_location:
+        state = dataclasses.replace(
+            state,
+            location=final_stack_state.location,
+            skip_hidden=final_stack_state.skip_hidden,
         )
-    )
-    t = threading.Thread(target=app.run)
-    t.start()
-    t.join()
-    if update_location:
-        state = dataclasses.replace(state, location=location)
-    frame = _current_frame(location)
+    frame = _current_frame(final_stack_state.location)
     if isinstance(frame, str):
         msg = frame
     else:
@@ -1845,7 +2174,7 @@ def _quit(state: _State) -> NoReturn:
 
 def _help(state: _State) -> _State:
     """Display a list of all debugger commands."""
-    _echo_later_lines(state.helpmsg)
+    _echo_later_lines(state.helpmsg())
     _echo_newline_end_command()
     return state
 
@@ -1870,6 +2199,11 @@ def debug(e: BaseException, /): ...
 # Called manually by a user on their favourite traceback.
 @overload
 def debug(tb: types.TracebackType, /): ...
+
+
+# Called manually by a user on their favourite frame.
+@overload
+def debug(tb: types.FrameType, /): ...
 
 
 # Called automatically by Python in `sys.excepthook()`
@@ -1920,12 +2254,20 @@ def debug(*args, stacklevel: int = 1):
         `PYTHONBREAKPOINT=patdb.debug`, and as your exception hook by setting
         `sys.excepthook=patdb.debug`.
     """
+    done_cell = _debug(*args, stacklevel=stacklevel)
+    gc.collect()
+    # We fill in `done_cell` only after the entirety of the `_debug` frame is gone and
+    # the gc has been ran. This ensures that we will not trigger `_next_call_trace`
+    # during e.g. weakref finalisation.
+    done_cell[0] = True
 
+
+def _debug(*args, stacklevel: int) -> list[bool]:
     #
     # Step 1: figure out how we're being called, and get the callstacks.
     #
 
-    e: Union[None, BaseException, types.TracebackType]
+    e: Union[None, BaseException, types.TracebackType, types.FrameType]
     if len(args) == 0:
         e = None
     elif len(args) == 1:
@@ -1956,13 +2298,13 @@ def debug(*args, stacklevel: int = 1):
         # - an implicit `sys.excepthook`.
         if e.__traceback__ is None:
             # Don't trigger on top-level SyntaxErrors/KeyboardInterrupts/etc.
-            return
+            return [False]
         if isinstance(e, bdb.BdbQuit):
             # If someone has mix-and-matched with bdb or pdb then don't raise on those.
-            return
+            return [False]
         if isinstance(e, SystemExit):
             # We definitely don't to intercept this one!
-            return
+            return [False]
         root_callstack = _get_callstacks_from_error(
             e,
             up_callstack=None,
@@ -1974,8 +2316,14 @@ def debug(*args, stacklevel: int = 1):
             # Called as an explicit `breakpoint()`.
             frames = tuple(
                 _Frame(x.frame, x.frame.f_lineno)
-                for x in inspect.stack()[stacklevel:][::-1]
+                for x in inspect.stack()[1 + stacklevel :][::-1]
             )
+        elif isinstance(e, types.FrameType):
+            frames = []
+            while e is not None:
+                frames.append(_Frame(e, e.f_lineno))
+                e = e.f_back
+            frames = tuple(reversed(frames))
         elif isinstance(e, types.TracebackType):
             # Called as an explicit `patdb.debug(some_traceback)`.
             frames = []
@@ -2037,7 +2385,9 @@ def debug(*args, stacklevel: int = 1):
 
         key_bindings.add(*binding.keys)(fn_wrapper)
     del key_bindings_
-    helpmsg = _make_help(fn_keys)
+    # We provide this as a callback as terminal width may change after the debugger has
+    # started.
+    helpmsg = lambda fn_keys=fn_keys: _make_help(fn_keys)
 
     #
     # Step 3: make the initial state of our REPL.
@@ -2056,6 +2406,7 @@ def debug(*args, stacklevel: int = 1):
         done=False,
         skip_hidden=True,
         location=_Location(root_callstack, frame_idx),
+        done_cell=[False],
         # Not replaceable
         print_history=prompt_toolkit.history.InMemoryHistory(),
         helpmsg=helpmsg,
@@ -2107,11 +2458,8 @@ def debug(*args, stacklevel: int = 1):
         output=output,
     )
     prompt = _patdb_prompt(state.depth)
-    if state.depth is None:
-        _config.depth = 1
-    else:
-        _config.depth = state.depth + 1
-    try:
+
+    with _depth_context(state.depth):
         while not state.done:
             click.echo(prompt, nl=False)
             t = ExcThread(target=app.run)
@@ -2150,11 +2498,6 @@ def debug(*args, stacklevel: int = 1):
             # `_echo_newline_end_command`).
             click.echo(f"{detected_keys}: ", nl=False)
             state = detected_fn(state)
-    finally:
-        if state.depth is None:
-            del _config.depth
-        else:
-            _config.depth = state.depth
 
     # We have a variable here that we explicitly hang on to for the lifetime of `debug`.
     # This `del` is used as a static assertion (for pyright) that it has *not* been
@@ -2174,3 +2517,4 @@ def debug(*args, stacklevel: int = 1):
     # It's probably not that important, but doing the right thing here isn't too tricky,
     # so we do it anyway.
     del root_callstack
+    return state.done_cell
