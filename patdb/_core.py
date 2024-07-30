@@ -58,15 +58,16 @@ import pygments.token
 #
 
 
-class _FormatConfig:
+class _Config:
+    #
+    # First we have configuration for formatting: colours etc.
+    #
     @ft.cached_property
     def code_style(self) -> str:
         return os.getenv("PATDB_CODE_STYLE", "solarized-dark")
 
-    #
     # These default colours are carefully chosen to be visible on both light and dark
     # terminal backgrounds.
-    #
 
     @ft.cached_property
     def emph_colour(self) -> tuple[int, int, int]:
@@ -104,8 +105,10 @@ class _FormatConfig:
         assert out is not None
         return out
 
+    #
+    # Here we have the keys for the REPL.
+    #
 
-class _KeyConfig:
     @ft.cached_property
     def key_down_frame(self) -> str:
         return os.getenv("PATDB_KEY_DOWN_FRAME", "j")
@@ -123,14 +126,6 @@ class _KeyConfig:
         return os.getenv("PATDB_KEY_UP_CALLSTACK", "K")
 
     @ft.cached_property
-    def key_down_line(self) -> str:
-        return os.getenv("PATDB_KEY_DOWN_LINE", "j")
-
-    @ft.cached_property
-    def key_up_line(self) -> str:
-        return os.getenv("PATDB_KEY_UP_LINE", "k")
-
-    @ft.cached_property
     def key_show_function(self) -> str:
         return os.getenv("PATDB_KEY_SHOW_FUNCTION", "s")
 
@@ -139,28 +134,8 @@ class _KeyConfig:
         return os.getenv("PATDB_KEY_SHOW_FILE", "S")
 
     @ft.cached_property
-    def key_show_down_call(self) -> str:
-        return os.getenv("PATDB_KEY_SHOW_DOWN_CALL", "J")
-
-    @ft.cached_property
-    def key_show_select(self) -> str:
-        return os.getenv("PATDB_KEY_SHOW_SELECT", "s/S")
-
-    @ft.cached_property
-    def key_show_leave(self) -> str:
-        return os.getenv("PATDB_KEY_SHOW_LEAVE", "q")
-
-    @ft.cached_property
     def key_stack(self) -> str:
         return os.getenv("PATDB_KEY_STACK", "t")
-
-    @ft.cached_property
-    def key_stack_select(self) -> str:
-        return os.getenv("PATDB_KEY_STACK_SELECT", "t")
-
-    @ft.cached_property
-    def key_stack_leave(self) -> str:
-        return os.getenv("PATDB_KEY_STACK_LEAVE", "q")
 
     @ft.cached_property
     def key_print(self) -> str:
@@ -179,18 +154,6 @@ class _KeyConfig:
         return os.getenv("PATDB_KEY_VISIBILITY", "v")
 
     @ft.cached_property
-    def key_toggle_error(self) -> str:
-        return os.getenv("PATDB_KEY_TOGGLE_ERROR", "r")
-
-    @ft.cached_property
-    def key_toggle_collapse_single(self) -> str:
-        return os.getenv("PATDB_KEY_TOGGLE_COLLAPSE_SINGLE", "o")
-
-    @ft.cached_property
-    def key_toggle_collapse_all(self) -> str:
-        return os.getenv("PATDB_KEY_TOGGLE_COLLAPSE_ALL", "O")
-
-    @ft.cached_property
     def key_continue(self) -> str:
         return os.getenv("PATDB_KEY_CONTINUE", "c")
 
@@ -202,8 +165,78 @@ class _KeyConfig:
     def key_help(self) -> str:
         return os.getenv("PATDB_KEY_HELP", "?")
 
+    #
+    # Now we have the keys for `(s)how_function` and `(S)how_file`.
+    #
 
-class _MiscConfig:
+    @ft.cached_property
+    def key_show_down_line(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_DOWN_LINE", "j")
+
+    @ft.cached_property
+    def key_show_up_line(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_UP_LINE", "k")
+
+    @ft.cached_property
+    def key_show_down_call(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_DOWN_CALL", "J")
+
+    @ft.cached_property
+    def key_show_select(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_SELECT", "c")
+
+    @ft.cached_property
+    def key_show_leave(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_LEAVE", "q")
+
+    #
+    # Next up, keys for `s(t)ack`.
+    #
+
+    @ft.cached_property
+    def key_stack_down_frame(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_DOWN_FRAME", "j")
+
+    @ft.cached_property
+    def key_stack_up_frame(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_UP_FRAME", "k")
+
+    @ft.cached_property
+    def key_stack_down_callstack(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_DOWN_CALLSTACK", "J")
+
+    @ft.cached_property
+    def key_stack_up_callstack(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_UP_CALLSTACK", "K")
+
+    @ft.cached_property
+    def key_stack_visibility(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_VISIBILITY", "v")
+
+    @ft.cached_property
+    def key_stack_error(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_ERROR", "r")
+
+    @ft.cached_property
+    def key_stack_collapse_single(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_COLLAPSE_SINGLE", "o")
+
+    @ft.cached_property
+    def key_stack_collapse_all(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_COLLAPSE_ALL", "O")
+
+    @ft.cached_property
+    def key_stack_select(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_SELECT", "c")
+
+    @ft.cached_property
+    def key_stack_leave(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_LEAVE", "q")
+
+    #
+    # Now various miscellanious things.
+    #
+
     # Uncached, it may change as we nest.
     @property
     def depth(self) -> Optional[int]:
@@ -238,6 +271,9 @@ class _MiscConfig:
         return os.getenv("PTPYTHON_CONFIG_HOME", None)
 
 
+_config = _Config()
+
+
 def _hex_to_rgb(x: str) -> Optional[tuple[int, int, int]]:
     x = _keep_fg_only(x)
     if x == "":
@@ -245,13 +281,6 @@ def _hex_to_rgb(x: str) -> Optional[tuple[int, int, int]]:
     else:
         x = x.removeprefix("#")
         return int(x[:2], base=16), int(x[2:4], base=16), int(x[4:], base=16)
-
-
-class _Config(_FormatConfig, _KeyConfig, _MiscConfig):
-    pass
-
-
-_config = _Config()
 
 
 #
@@ -1430,14 +1459,14 @@ def _show_source(
             + click.style("", bg=bg_line, reset=False),
         )
 
-    def _up_line(
+    def _show_up_line(
         carry: tuple[Optional[int], bool],
     ) -> tuple[tuple[Optional[int], bool], bool]:
         interactive_line_num, _ = carry
         assert interactive_line_num is not None
         return (max(first_line_num, interactive_line_num - 1), False), False
 
-    def _down_line(
+    def _show_down_line(
         carry: tuple[Optional[int], bool],
     ) -> tuple[tuple[Optional[int], bool], bool]:
         interactive_line_num, _ = carry
@@ -1465,8 +1494,8 @@ def _show_source(
         return (interactive_line_num, False), True
 
     key_mapping = {
-        _down_line: (_config.key_down_line, None),
-        _up_line: (_config.key_up_line, "to scroll"),
+        _show_down_line: (_config.key_show_down_line, None),
+        _show_up_line: (_config.key_show_up_line, "to scroll"),
         _show_down_call: (
             _config.key_show_down_call,
             "to resume execution until the next function call",
@@ -1860,7 +1889,7 @@ def _stack(state: _State) -> _State:
             ellipsis="  │ ...",
         )
 
-    def _down_frame(stack_state: _StackState) -> tuple[_StackState, bool]:
+    def _stack_down_frame(stack_state: _StackState) -> tuple[_StackState, bool]:
         if _is_collapsed(stack_state, stack_state.location.callstack):
             return stack_state, False
         else:
@@ -1872,7 +1901,7 @@ def _stack(state: _State) -> _State:
             )
             return dataclasses.replace(stack_state, location=move.location), False
 
-    def _up_frame(stack_state: _StackState) -> tuple[_StackState, bool]:
+    def _stack_up_frame(stack_state: _StackState) -> tuple[_StackState, bool]:
         if _is_collapsed(stack_state, stack_state.location.callstack):
             return stack_state, False
         else:
@@ -1884,7 +1913,7 @@ def _stack(state: _State) -> _State:
             )
             return dataclasses.replace(stack_state, location=move.location), False
 
-    def _down_callstack(stack_state: _StackState) -> tuple[_StackState, bool]:
+    def _stack_down_callstack(stack_state: _StackState) -> tuple[_StackState, bool]:
         move = _move_callstack(
             state.root_callstack,
             stack_state.location,
@@ -1893,7 +1922,7 @@ def _stack(state: _State) -> _State:
         )
         return dataclasses.replace(stack_state, location=move.location), False
 
-    def _up_callstack(stack_state: _StackState) -> tuple[_StackState, bool]:
+    def _stack_up_callstack(stack_state: _StackState) -> tuple[_StackState, bool]:
         move = _move_callstack(
             state.root_callstack,
             stack_state.location,
@@ -1902,17 +1931,17 @@ def _stack(state: _State) -> _State:
         )
         return dataclasses.replace(stack_state, location=move.location), False
 
-    def _visibility(stack_state: _StackState) -> tuple[_StackState, bool]:
+    def _stack_visibility(stack_state: _StackState) -> tuple[_StackState, bool]:
         return dataclasses.replace(
             stack_state, skip_hidden=not stack_state.skip_hidden
         ), False
 
-    def _toggle_error(stack_state: _StackState) -> tuple[_StackState, bool]:
+    def _stack_error(stack_state: _StackState) -> tuple[_StackState, bool]:
         return dataclasses.replace(
             stack_state, short_error=not stack_state.short_error
         ), False
 
-    def _toggle_collapse_single(stack_state: _StackState) -> tuple[_StackState, bool]:
+    def _stack_collapse_single(stack_state: _StackState) -> tuple[_StackState, bool]:
         is_callstack_collapsed = stack_state.is_callstack_collapsed.copy()
         is_callstack_collapsed[stack_state.location.callstack] = not _is_collapsed(
             stack_state, stack_state.location.callstack
@@ -1921,7 +1950,7 @@ def _stack(state: _State) -> _State:
             stack_state, is_callstack_collapsed=is_callstack_collapsed
         ), False
 
-    def _toggle_collapse_all(stack_state: _StackState) -> tuple[_StackState, bool]:
+    def _stack_collapse_all(stack_state: _StackState) -> tuple[_StackState, bool]:
         value = not all(stack_state.is_callstack_collapsed.values())
         is_callstack_collapsed = stack_state.is_callstack_collapsed.copy()
         for key in is_callstack_collapsed.keys():
@@ -1937,18 +1966,18 @@ def _stack(state: _State) -> _State:
         return stack_state, True
 
     key_mapping = {
-        _down_frame: (_config.key_down_frame, None),
-        _up_frame: (_config.key_up_frame, None),
-        _down_callstack: (_config.key_down_callstack, None),
-        _up_callstack: (_config.key_up_callstack, "to scroll"),
-        _visibility: (_config.key_visibility, "to show/hide error messages"),
-        _toggle_error: (_config.key_toggle_error, "to show/hide hidden frames"),
-        _toggle_collapse_single: (
-            _config.key_toggle_collapse_single,
+        _stack_down_frame: (_config.key_stack_down_frame, None),
+        _stack_up_frame: (_config.key_stack_up_frame, None),
+        _stack_down_callstack: (_config.key_stack_down_callstack, None),
+        _stack_up_callstack: (_config.key_stack_up_callstack, "to scroll"),
+        _stack_visibility: (_config.key_stack_visibility, "to show/hide hidden frames"),
+        _stack_error: (_config.key_stack_error, "to show/hide error messages"),
+        _stack_collapse_single: (
+            _config.key_stack_collapse_single,
             "to show/hide a callstack",
         ),
-        _toggle_collapse_all: (
-            _config.key_toggle_collapse_all,
+        _stack_collapse_all: (
+            _config.key_stack_collapse_all,
             "to show/hide every callstack",
         ),
         _stack_select: (_config.key_stack_select, "to switch to a frame"),
