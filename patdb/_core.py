@@ -2068,13 +2068,15 @@ def _print(state: _State) -> _State:
         return state
     try:
         value = eval(text, globals, locals)
-    except BaseException as e:
-        string = "\n".join(_format_exception(e, short=False))
-    else:
+        # We also include the formatting here, as the object may have a malformed
+        # `__repr__`.
         width = shutil.get_terminal_size().columns
         string = pprint.pformat(
             value, width=width, compact=True, sort_dicts=False, underscore_numbers=True
         )
+    except BaseException as e:
+        string = "\n".join(_format_exception(e, short=False))
+    else:
         if "\x1b" not in string:
             # If there's an escape code in there, then probably `string` has already
             # returned something with pretty formatting. Let's not try to second-guess

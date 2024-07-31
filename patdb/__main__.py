@@ -1,3 +1,4 @@
+import inspect
 import pathlib
 import sys
 import tempfile
@@ -24,6 +25,9 @@ def _run(filepath: str, args: list[str]):
 @click.option("-c")
 @click.argument("args", nargs=-1)
 def run(c, args):
+    for frame in inspect.stack():
+        frame.frame.f_locals["__tracebackhide__"] = True
+
     if c is None:
         if len(args) == 0:
             # Just `python -m patdb`.
