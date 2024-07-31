@@ -22,7 +22,7 @@ import traceback
 import types
 import weakref
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any, NoReturn, Optional, overload, TypeVar, Union
+from typing import Any, Literal, NoReturn, Optional, overload, TypeVar, Union
 from typing_extensions import Self, TypeGuard
 
 import click
@@ -178,6 +178,14 @@ class _Config:
         return os.getenv("PATDB_KEY_SHOW_UP_LINE", "k")
 
     @ft.cached_property
+    def key_show_left(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_LEFT", "h")
+
+    @ft.cached_property
+    def key_show_right(self) -> str:
+        return os.getenv("PATDB_KEY_SHOW_RIGHT", "l")
+
+    @ft.cached_property
     def key_show_down_call(self) -> str:
         return os.getenv("PATDB_KEY_SHOW_DOWN_CALL", "J")
 
@@ -210,6 +218,14 @@ class _Config:
         return os.getenv("PATDB_KEY_STACK_UP_CALLSTACK", "K")
 
     @ft.cached_property
+    def key_stack_left(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_LEFT", "h")
+
+    @ft.cached_property
+    def key_stack_right(self) -> str:
+        return os.getenv("PATDB_KEY_STACK_RIGHT", "l")
+
+    @ft.cached_property
     def key_stack_visibility(self) -> str:
         return os.getenv("PATDB_KEY_STACK_VISIBILITY", "v")
 
@@ -234,7 +250,7 @@ class _Config:
         return os.getenv("PATDB_KEY_STACK_LEAVE", "q")
 
     #
-    # Now various miscellanious things.
+    # Now various miscellaneous things.
     #
 
     # Uncached, it may change as we nest.
@@ -944,22 +960,41 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
 # Implementations for the REPL and its commands
 #
 
+_ansi_re = re.compile(r"(\x1b\[[;?0-9]*[a-zA-Z])")  # stolen from `click.unstyle`
+
 
 def _format_text_for_basic_app(
-    text: list[str],
+    text: list[str], hscroll: int
 ) -> list[prompt_toolkit.formatted_text.OneStyleAndTextTuple]:
+    scrolled_text: list[str] = []
+    for line in text:
+        wrapped_line: list[str] = []
+        line_hscroll = hscroll
+        for piece in _ansi_re.split(line):
+            if _ansi_re.match(piece) is None and piece != "":
+                if line_hscroll > len(piece):
+                    line_hscroll -= len(piece)
+                else:
+                    piece = piece[line_hscroll:]
+                    line_hscroll = 0
+                    wrapped_line.append(piece)
+            else:
+                wrapped_line.append(piece)
+        scrolled_text.append("".join(wrapped_line))
+
     formatted_text: list[prompt_toolkit.formatted_text.OneStyleAndTextTuple] = [
         ("[ZeroWidthEscape]", "\r")
     ]
-    for line in text:
+    for line in scrolled_text:
         formatted_text.append(("[ZeroWidthEscape]", "\x1b[2K"))  # erase entire line
-        formatted_text.append(("[ZeroWidthEscape]", line))
+
         # fill background + move cursor to right edge of screen: the newline doesn't get
         # the background colour for some reason, so we punt it to the right edge of the
         # screen.
+        formatted_text.append(("[ZeroWidthEscape]", line))
         formatted_text.append(("[ZeroWidthEscape]", "\x1b[K\x1b[1000C"))
         formatted_text.append(("", "\n"))  # separate so the last one can be popped.
-    if len(text) > 0:
+    if len(formatted_text) > 0:
         formatted_text.pop()
     return formatted_text
 
@@ -968,21 +1003,32 @@ def _basic_app(
     initial_carry: _Carry,
     display: Callable[[_Carry], list[str]],
     key_mapping: dict[
-        Callable[[_Carry], tuple[_Carry, bool]], tuple[str, Optional[str]]
+        Union[Callable[[_Carry], tuple[_Carry, bool]], Literal["left", "right"]],
+        tuple[str, Optional[str]],
     ],
     depth: Optional[int],
 ) -> _Carry:
     carry = initial_carry
+    hscroll = 0
+    initial_text = display(initial_carry)
+    max_width = max(len(click.unstyle(line)) for line in initial_text)
 
     new_key_mapping = {}
     for k, v in key_mapping.items():
 
-        @ft.wraps(k)
         def new_k(event, k=k):
-            nonlocal carry
-            carry, done = k(carry)
+            nonlocal carry, hscroll
+            if k == "left":
+                hscroll = max(0, hscroll - 5)
+                done = False
+            elif k == "right":
+                hscroll = min(hscroll + 5, max_width)
+                done = False
+            else:
+                assert callable(k)
+                carry, done = k(carry)
             event.app.layout.container.content.text = _format_text_for_basic_app(
-                display(carry)
+                display(carry), hscroll
             )
             event.app.reset()
             if done:
@@ -999,9 +1045,11 @@ def _basic_app(
 
     container = prompt_toolkit.layout.containers.Window(
         content=prompt_toolkit.layout.controls.FormattedTextControl(
-            text=_format_text_for_basic_app(display(initial_carry)), show_cursor=False
+            text=_format_text_for_basic_app(initial_text, 0), show_cursor=False
         ),
-        wrap_lines=True,
+        # `wrap_lines=True` doesn't seem to work? It's not such a big deal, scrolling
+        # horizontally is arguably more readable anyway.
+        wrap_lines=False,
         # For some reason we need a dummy style here to get this to print correctly.
         style="class:foo",
     )
@@ -1493,9 +1541,11 @@ def _show_source(
         assert interactive_line_num is not None
         return (interactive_line_num, False), True
 
-    key_mapping = {
+    key_mapping: dict = {
         _show_down_line: (_config.key_show_down_line, None),
         _show_up_line: (_config.key_show_up_line, "to scroll"),
+        "left": (_config.key_show_left, None),
+        "right": (_config.key_show_right, "to move view left/right"),
         _show_down_call: (
             _config.key_show_down_call,
             "to resume execution until the next function call",
@@ -1965,11 +2015,13 @@ def _stack(state: _State) -> _State:
     def _stack_leave(stack_state: _StackState) -> tuple[_StackState, bool]:
         return stack_state, True
 
-    key_mapping = {
+    key_mapping: dict = {
         _stack_down_frame: (_config.key_stack_down_frame, None),
         _stack_up_frame: (_config.key_stack_up_frame, None),
         _stack_down_callstack: (_config.key_stack_down_callstack, None),
         _stack_up_callstack: (_config.key_stack_up_callstack, "to scroll"),
+        "left": (_config.key_stack_left, None),
+        "right": (_config.key_stack_right, "to move view left/right"),
         _stack_visibility: (_config.key_stack_visibility, "to show/hide hidden frames"),
         _stack_error: (_config.key_stack_error, "to show/hide error messages"),
         _stack_collapse_single: (
