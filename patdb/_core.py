@@ -2250,6 +2250,10 @@ def _continue(state: _State) -> _State:
 def _quit(state: _State) -> NoReturn:
     """Quit the whole Python program."""
     del state
+    # When using `pytest` -> `breakpoint()` -> `(q)uit`, it shows the visible stack
+    # frames in between.
+    __tracebackhide__ = True
+
     _echo_first_line("Quitting.")
     _echo_newline_end_command()
     sys.exit()
@@ -2337,6 +2341,10 @@ def debug(*args, stacklevel: int = 1):
         `PYTHONBREAKPOINT=patdb.debug`, and as your exception hook by setting
         `sys.excepthook=patdb.debug`.
     """
+    # When using `pytest` -> `breakpoint()` -> `(q)uit`, it shows the visible stack
+    # frames in between.
+    __tracebackhide__ = True
+
     done_cell = _debug(*args, stacklevel=stacklevel)
     gc.collect()
     # We fill in `done_cell` only after the entirety of the `_debug` frame is gone and
@@ -2346,6 +2354,10 @@ def debug(*args, stacklevel: int = 1):
 
 
 def _debug(*args, stacklevel: int) -> list[bool]:
+    # When using `pytest` -> `breakpoint()` -> `(q)uit`, it shows the visible stack
+    # frames in between.
+    __tracebackhide__ = True
+
     #
     # Step 1: figure out how we're being called, and get the callstacks.
     #
