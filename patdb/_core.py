@@ -2214,6 +2214,11 @@ def _interpret(state: _State) -> _State:
         return state
     # Adjust our prompts based on how nested our interpreters and debuggers are.
     globals, locals = _make_namespaces(state)
+    sentinel = object()
+    last_e = {
+        last_e_name: getattr(sys, last_e_name, sentinel)
+        for last_e_name in ("last_type", "last_value", "last_traceback", "last_exc")
+    }
     try:
         _echo_later_lines("")
         ptpython.repl.embed(
@@ -2224,6 +2229,13 @@ def _interpret(state: _State) -> _State:
         )
     except SystemExit:
         pass
+    finally:
+        for last_e_name, last_e_value in last_e.items():
+            if last_e_value is sentinel:
+                if hasattr(sys, last_e_name):
+                    delattr(sys, last_e_name)
+            else:
+                setattr(sys, last_e_name, last_e_value)
     # We already have a spurious newline from the interpreter
     # _echo_newline_end_command()
     return state
