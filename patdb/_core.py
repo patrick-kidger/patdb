@@ -11,7 +11,6 @@ import inspect
 import operator
 import os
 import pathlib
-import pprint
 import re
 import shutil
 import subprocess
@@ -51,6 +50,19 @@ import pygments.formatters
 import pygments.lexers
 import pygments.styles
 import pygments.token
+
+
+if sys.version_info >= (3, 10):
+    # Uses match statements, so >=3.10 only.
+    # They're just too pretty to remove, and 3.9 is close to end-of-life now anyway...
+    from ._pprint import pformat
+else:
+    import pprint
+
+    def pformat(text, width):
+        return pprint.pformat(
+            text, width=width, compact=True, sort_dicts=False, underscore_numbers=True
+        )
 
 
 #
@@ -1560,6 +1572,26 @@ def _show_source(
     return _basic_app((current_line_num, False), _display, key_mapping, depth)
 
 
+def _show_line(frame: _Frame) -> Optional[str]:
+    source_lines = frame.get_function_source()
+    if source_lines is None:
+        return None
+    else:
+        index = frame.line - frame.f_code.co_firstlineno
+        if index < 0:
+            return None
+        try:
+            source_line = source_lines[index]
+        except IndexError:
+            # I don't know if this is ever possible, but just in case.
+            return None
+        else:
+            [(source_line, _)] = _format_source(
+                source_line, frame.line, frame.line, frame.line
+            )
+            return source_line + "\x1b[K"
+
+
 def _update_and_display_move(
     move: _MoveLocation,
     state: _State,
@@ -1584,21 +1616,10 @@ def _update_and_display_move(
     if not isinstance(frame, str):
         # If it's a string then we're in a frameless callstack, and our existing
         # `frameless_msg` applies.
-        source_lines = frame.get_function_source()
-        if source_lines is None:
+        source_line = _show_line(frame)
+        if source_line is None:
             source_line = "<no source found>"
-        else:
-            index = frame.line - frame.f_code.co_firstlineno
-            try:
-                source_line = source_lines[index]
-            except IndexError:
-                # I don't know if this is ever possible, but just in case.
-                source_line = "<no source found>"
-            else:
-                [(source_line, _)] = _format_source(
-                    source_line, frame.line, frame.line, frame.line
-                )
-        _echo_later_lines(source_line + "\x1b[K")
+        _echo_later_lines(source_line)
     _echo_newline_end_command()
     return state
 
@@ -2047,9 +2068,13 @@ def _stack(state: _State) -> _State:
     frame = _current_frame(final_stack_state.location)
     if isinstance(frame, str):
         msg = frame
+        source_line = None
     else:
         msg = _format_frame(frame)
+        source_line = _show_line(frame)
     _echo_first_line(msg)  # `app.run()` adds a newline.
+    if source_line is not None:
+        _echo_later_lines(source_line)
     _echo_newline_end_command()
     return state
 
@@ -2118,14 +2143,12 @@ def _print(state: _State) -> _State:
     text_strip = text.strip()
     if text_strip == "" or text_strip.startswith("#"):
         return state
+    width = shutil.get_terminal_size().columns
     try:
         value = eval(text, globals, locals)
-        # We also include the formatting here, as the object may have a malformed
-        # `__repr__`.
-        width = shutil.get_terminal_size().columns
-        string = pprint.pformat(
-            value, width=width, compact=True, sort_dicts=False, underscore_numbers=True
-        )
+        # We also include the formatting inside the `try`, as the object may have a
+        # malformed `__repr__`.
+        string = pformat(value, width=width)
     except BaseException as e:
         string = "\n".join(_format_exception(e, short=False))
     else:
@@ -2533,6 +2556,10 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     click.echo(frame_info)
     if e is not None:
         click.echo("\n".join(_format_exception(e, short=False)))
+    if not isinstance(frame, str):
+        source_line = _show_line(frame)
+        if source_line is not None:
+            click.secho(source_line, reset=True)
     try:
         helpkeys = fn_keys[_help]
     except KeyError:
