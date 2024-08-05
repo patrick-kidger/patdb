@@ -199,7 +199,7 @@ def pdoc(
     - `custom`: a way to pretty-doc custom types. This will be called on every object it
         encounters. If its return is `None` then the usual behaviour will be performed.
         If its return is an `AbstractDoc` then that will be used instead.
-    - `**kwargs`: all kwargs are forwarded on to all `__kidgerbase_pdoc__` calls, as an
+    - `**kwargs`: all kwargs are forwarded on to all `__pp__` calls, as an
         escape hatch for custom behaviour.
 
     **Returns:**
@@ -211,12 +211,12 @@ def pdoc(
         The behaviour of this function can be customised in two ways.
 
         First, any object which implements a
-        `__kidgerbase_pdoc__(self) -> None | AbstractDoc` method will have that method
+        `__pp__(self) -> None | AbstractDoc` method will have that method
         called to determine its pretty-doc.
 
         Second, the `custom` argument to this function can be used. This is particularly
         useful to provide custom pretty-docs for objects provided by third-party
-        libraries. (For which you cannot add a `__kidgerbase_pdoc__` method.)
+        libraries. (For which you cannot add a `__pp__` method.)
     """
 
     kwargs["indent"] = indent
@@ -230,8 +230,8 @@ def pdoc(
     if maybe_custom is not None:
         return maybe_custom
 
-    if hasattr(obj, "__kidgerbase_pdoc__"):
-        custom_pp = obj.__kidgerbase_pdoc__(**kwargs)
+    if hasattr(obj, "__pp__"):
+        custom_pp = obj.__pp__(**kwargs)
         if custom_pp is not None:
             return GroupDoc(custom_pp)
 
@@ -247,7 +247,8 @@ def pdoc(
     elif _array_kind(obj) is not None:
         return _pformat_ndarray(obj, **kwargs)
     elif follow_wrapped and hasattr(obj, "__wrapped__"):
-        return pdoc(obj.__wrapped__, wrapped=True, **kwargs)
+        kwargs["wrapped"] = True
+        return pdoc(obj.__wrapped__, **kwargs)
     elif isinstance(obj, ft.partial):
         return _pformat_partial(obj, **kwargs)
     elif isinstance(obj, types.FunctionType):
@@ -284,7 +285,7 @@ def pformat(
     - `custom`: a way to pretty-doc custom types. This will be called on every object it
         encounters. If its return is `None` then the usual behaviour will be performed.
         If its return is an `AbstractDoc` then that will be used instead.
-    - `**kwargs`: all kwargs are forwarded on to all `__kidgerbase_pdoc__` calls, as an
+    - `**kwargs`: all kwargs are forwarded on to all `__pp__` calls, as an
         escape hatch for custom behaviour.
 
     **Returns:**
@@ -296,12 +297,12 @@ def pformat(
         The behaviour of this function can be customised in two ways.
 
         First, any object which implements a
-        `__kidgerbase_pdoc__(self) -> None | AbstractDoc` method will have that method
+        `__pp__(self) -> None | AbstractDoc` method will have that method
         called to determine its pretty-doc.
 
         Second, the `custom` argument to this function can be used. This is particularly
         useful to provide custom pretty-docs for objects provided by third-party
-        libraries. (For which you cannot add a `__kidgerbase_pdoc__` method.)
+        libraries. (For which you cannot add a `__pp__` method.)
     """
 
     doc = pdoc(
