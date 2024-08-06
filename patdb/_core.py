@@ -343,7 +343,7 @@ else:
             _dark_terminal_bg = True
         else:
             _dark_terminal_bg = False
-    except ValueError:
+    except (ValueError, IndexError):
         _dark_terminal_bg = None
 _OriginalPygmentsStyle = pygments.styles.get_style_by_name(_config.code_style)
 
@@ -1823,9 +1823,7 @@ def _up_callstack(state: _State) -> _State:
 
 
 def _show_function(state: _State) -> _State:
-    """Show the current function's source code and set breakpoints."""  # noqa: E501
-    # noqa as we grab the first line of the docstring for our help messages, so we don't
-    # want to wrap it.
+    """Show the current function's source code and interactively set breakpoints."""
     frame = _current_frame(state.location)
     if isinstance(frame, str):
         _echo_first_line(frame)
@@ -1866,7 +1864,7 @@ def _show_function(state: _State) -> _State:
 # which we can scroll through the file or jump to where we are in it. For that there is
 # `(e)dit`. (Honestly this command isn't super useful, just because `(e)dit` exists.)
 def _show_file(state: _State) -> _State:
-    """Show the current file's source code and set breakpoints."""  # noqa: E501
+    """Show the current file's source code and interactively set breakpoints."""
     frame = _current_frame(state.location)
     if isinstance(frame, str):
         _echo_first_line(frame)
@@ -2080,7 +2078,7 @@ def _stack(state: _State) -> _State:
 
 
 def _print(state: _State) -> _State:
-    """Prints the value of a variable.
+    """Pretty-prints the value of an expression. (Wrap it in a `print` to normal-print.)
 
     Printing a variable is such a common thing to do that we break our usual "minimal
     interface" rule, and we do offer a special command for this. (As opposed to opening
@@ -2265,7 +2263,7 @@ def _interpret(state: _State) -> _State:
 
 
 def _visibility(state: _State) -> _State:
-    """Toggles skipping hidden frames in other commands."""
+    """Pretty-prints the value of an expression. (Wrap it in a `print` to normal-print.)"""  # noqa: E501
     state = dataclasses.replace(state, skip_hidden=not state.skip_hidden)
     if state.skip_hidden:
         _echo_first_line("Now skipping hidden frames.")

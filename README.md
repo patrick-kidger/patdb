@@ -36,25 +36,23 @@ When running a file: `python -m patdb foo.py`. When running interactively: call 
 ## Commands
 
 ```
-j         : down_frame     - Move one frame down.
-k         : up_frame       - Move one frame up.
-J         : down_callstack - Move one callstack down.
-K         : up_callstack   - Move one callstack up.
-s         : show_function  - Show the current function's source code and set breakpoints.
-S         : show_file      - Show the current file's source code and set breakpoints.
-t         : stack          - Show all frames in all callstacks and interactively scroll through them.
-p         : print          - Prints the value of a variable.
-e         : edit           - Open the current function in your $EDITOR.
-i         : interpret      - Open a Python interpreter in the current frame.
-v         : visibility     - Toggles skipping hidden frames in other commands.
-escape+d/c: continue       - Close the debugger and continue the program.
-q         : quit           - Quit the whole Python program.
-?         : help           - Display a list of all debugger commands.
+j: down_frame     - Move one frame down.
+k: up_frame       - Move one frame up.
+J: down_callstack - Move one callstack down.
+K: up_callstack   - Move one callstack up.
+s: show_function  - Show the current function's source code and interactively set breakpoints.
+S: show_file      - Show the current file's source code and interactively set breakpoints.
+t: stack          - Show all frames in all callstacks and interactively scroll through them.
+p: print          - Pretty-prints the value of an expression. (Wrap it in a `print` to normal-print.)
+e: edit           - Open the current function in your `$EDITOR`.
+i: interpret      - Open a Python interpreter in the current frame.
+v: visibility     - Toggles skipping hidden frames when moving frames or callstacks.
+c: continue       - Close the debugger and continue the program.
+q: quit           - Quit the whole Python program.
+?: help           - Display a list of all debugger commands.
 ```
 
 Here, a "callstack" refers to all of the frames in the traceback of a single exception, so e.g. `J` moves down to a nested exception.
-
-`show_function`/`show_file`/`stack` all offer interactive interfaces, the rest of the commands return to the REPL immediately.
 
 ## Configuration
 
@@ -70,6 +68,7 @@ PATDB_PROMPT_COLOR
 
 PATDB_DEPTH
 PATDB_EDITOR
+
 PATDB_KEY_{command name}, e.g. `PATDB_DOWN_FRAME`
 
 COLORFGBG
@@ -78,24 +77,59 @@ PTPYTHON_CONFIG_HOME
 ```
 
 - `PATDB_CODE_STYLE`: used by the `show_function` and `show_file` commands, as the colour theme for displaying code. Can be the name of any [Pygments style](https://pygments.org/styles/), to use as the theme for code. Defaults to `solarized-dark`.
-
-- `PATDB_{EMPH,ERROR,INFO,PROMPT}_COLOR`: the colours used by various parts of the UI.
+- `PATDB_EMPH_COLOR`: the colour used to emphasise the file/function/lines when displaying location, e.g. in `File *foo.py*, at *some_fn* from *1*, line *2*`. Defaults to `#4cb066`.
+- `PATDB_ERROR_COLOR`: the colour used to display the type of error e.g. in `*RuntimeError*: something went wrong`. Defaults to `#dc322f`.
+- `PATDB_INFO_COLOR`: the colour used to display `patdb:` info prompts. Defaults to `#888888`.
+- `PATDB_PROMPT_COLOR`: the color used to display the `patdb>` REPL prompt. Defaults to `#268bd2`.
 
 - `PATDB_DEPTH`: controls the `patdb` prompt and the prompt of any nested `interpret`ers. By default it is just `patdb>` and `>>>` respectively. If you nest `patdb->interpret->patdb->...` then this environment variable will increment and successive prompts will appear as `patdb1>`, `1>>>`, `patdb2>` etc.
-
-- `PATDB_EDITOR`: used by the `edit` command. If set then this command will call `$PADB_EDITOR $filename $linenumber`. If not set then it will fall back to just `$EDITOR $filename`.
+- `PATDB_EDITOR`: used by the `edit` command. If set then this command will call `$PATDB_EDITOR $filename $linenumber`. If not set then it will fall back to just `$EDITOR $filename`.
 
 - `PATDB_KEY_{command name}`: this offers a way to rebind keys. For example `PATDB_KEY_DOWN_FRAME=d` to replace the default `j` with `d`.
     - Can require that a chain of keys is pressed by separating them with `+`. For example `PATDB_KEY_DOWN_FRAME=a+b` requires that `a` and then `b` be pressed to trigger that command.
     - Can accept multiple different key bindings for the same command by separating them with a `/`. For example `PATDB_KEY_DOWN_FRAME=j/d`.
-    - Modifiers keys can be applied following [prompt_toolkit syntax](https://python-prompt-toolkit.readthedocs.io/en/master/pages/advanced_topics/key_bindings.html). In particular this treats `Control` as part of the same key, so that for example `c-x` is `Control X`. Meanwhile `Alt` is (in the usual way for terminals) treated as a separate key press of `escape`, so that for example `escape+d` is `Alt d` 
+    - Modifiers keys can be applied following [prompt_toolkit syntax](https://python-prompt-toolkit.readthedocs.io/en/master/pages/advanced_topics/key_bindings.html). In particular this treats `Control` as part of the same key, so that for example `c-x` is `Control x`. Meanwhile `Alt` is (in the usual way for terminals) treated as a separate key press of `escape`, so that for example `escape+d` is `Alt d` 
     - Overall, for example: `a/c-k+b/escape+l` means that any of `a`, or `Control k` followed by `b`, or `Alt l`, will trigger that keybind.
+    - The full list of all keys is as follows. The group of keys starting `PATDB_KEY_SHOW_` correspond to the interactive commands within the `show_file` and `show_function` command. The group of keys starting `PATDB_KEY_STACK_` correspond to the interactive commands within the `stack` command.
+        ```
+        PATDB_KEY_DOWN_FRAME
+        PATDB_KEY_UP_FRAME
+        PATDB_KEY_DOWN_CALLSTACK
+        PATDB_KEY_UP_CALLSTACK
+        PATDB_KEY_SHOW_FUNCTION
+        PATDB_KEY_SHOW_FILE
+        PATDB_KEY_STACK
+        PATDB_KEY_PRINT
+        PATDB_KEY_EDIT
+        PATDB_KEY_INTERPRET
+        PATDB_KEY_VISIBILITY
+        PATDB_KEY_CONTINUE
+        PATDB_KEY_QUIT
+        PATDB_KEY_HELP
+        PATDB_KEY_SHOW_DOWN_LINE
+        PATDB_KEY_SHOW_UP_LINE
+        PATDB_KEY_SHOW_LEFT
+        PATDB_KEY_SHOW_RIGHT
+        PATDB_KEY_SHOW_DOWN_CALL
+        PATDB_KEY_SHOW_SELECT
+        PATDB_KEY_SHOW_LEAVE
+        PATDB_KEY_STACK_DOWN_FRAME
+        PATDB_KEY_STACK_UP_FRAME
+        PATDB_KEY_STACK_DOWN_CALLSTACK
+        PATDB_KEY_STACK_UP_CALLSTACK
+        PATDB_KEY_STACK_LEFT
+        PATDB_KEY_STACK_RIGHT
+        PATDB_KEY_STACK_VISIBILITY
+        PATDB_KEY_STACK_ERROR
+        PATDB_KEY_STACK_COLLAPSE_SINGLE
+        PATDB_KEY_STACK_COLLAPSE_ALL
+        PATDB_KEY_STACK_SELECT
+        PATDB_KEY_STACK_LEAVE
+        ```
 
-- `COLORFGBG`: if available, will be queried to determine if your terminal is using a light or dark background. This is used to determine the fallback colour for any tokens not specified by the code style specified in `PATDB_CODE_STYLE`.
-
+- `COLORFGBG`: some environments provide this to describe the colour of the terminal. If available, this will be queried to determine if your terminal is using a light or dark background. This is used to determine the fallback colour for any tokens not specified by the code style specified in `PATDB_CODE_STYLE`.
 - `EDITOR`: used as a fallback if `PATDB_EDITOR` is not available.
-
-- `PTPYTHON_CONFIG_HOME`: used by the `interpret` command. This command uses [`ptpython`](https://github.com/prompt-toolkit/ptpython) for the interpreter, and we respect any existing configuration you have for this.
+- `PTPYTHON_CONFIG_HOME`: used by the `interpret` command. This command uses [`ptpython`](https://github.com/prompt-toolkit/ptpython) for the interpreter, and we respect any existing configuration you have configured for `ptpython`.
 </details>
 
 ## FAQ
@@ -115,21 +149,15 @@ The built-in debugger is called `pdb`, and my name is Patrick! 😁
 <details>
 <summary>How does <code>patdb</code> differ from <code>pdb</code>/... etc?</summary>
 
-##### `pdb`/`pdb++`?
+##### `pdb`/`pdb++`/`ipdb`?
 
-We offer syntax highlighting; nested exceptions; interacting with hidden frames; a hybrid TUI/REPL interface rather than pure-REPL.
+We handle nested exceptions; scrolling through the stack; syntax highlighting; interacting with hidden frames; etc etc. (`ipdb` does offer a couple of those last ones as well.)
 
-##### `ipdb`?
-
-Same as for `pdb`, except that `ipdb` does support syntax highlighting and hidden frames.
+`patdb` largely aims to supersede these debuggers.
 
 ##### `pudb`?
 
-`pudb` offers a "graphical" interface, displaying information about variables / exceptions / code / etc. in multiple panes. In contrast we go for a more traditional REPL-like interface. 
-
-This is a bit of a philosophical choice -- personally I prefer REPLs, as this keeps a history of all the things I've ever done, which I can go back and check if required. I find this particularly valuable when debugging! But others may prefer the graphical interface of `pudb`.
-
-Other than that, we also handle nested exceptions, and offer an easier way to open post-mortem.
+We handle nested exceptions. The main difference, though, is that `pudb` offers a "graphical" interface, displaying information about variables / exceptions / code / etc. in multiple panes. This is a bit of a philosophical choice -- personally I prefer REPL-like interfaces, as these keep a history of all the things I've ever done, which I can go back and check if required. I find this particularly valuable when debugging! But others may prefer the graphical interface of `pudb`.
 </details>
 
 ## Advanced usage
