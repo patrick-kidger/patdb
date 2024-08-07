@@ -232,8 +232,12 @@ def pdoc(
 
     if hasattr(obj, "__pp__"):
         custom_pp = obj.__pp__(**kwargs)
-        if custom_pp is not None:
+        if isinstance(custom_pp, AbstractDoc):
             return GroupDoc(custom_pp)
+        elif custom_pp is NotImplemented:
+            pass
+        else:
+            return pdoc(custom_pp, **kwargs)
 
     if isinstance(obj, tuple):
         if hasattr(obj, "_fields"):

@@ -865,6 +865,9 @@ def is_frame_pytest(frame: _Frame) -> bool:
     for module in ("pytest", "_pytest", "pluggy"):
         if name == module or name.startswith(f"{module}."):
             return True
+    filename = frame.f_code.co_filename
+    if filename == "pytest" or filename.endswith("/pytest"):
+        return True
     return False
 
 
@@ -929,21 +932,6 @@ class _IndentPrompt(ptpython.prompt_style.PromptStyle):
         return out
 
 
-def _ptpython_configure(repl: ptpython.repl.PythonRepl):
-    config = _config.ptpython_config_home
-    if config is not None and os.path.exists(config):
-        ptpython.repl.run_config(repl, config)
-    if _config.depth is not None:
-        for k, v in list(repl.all_prompt_styles.items()):
-            repl.all_prompt_styles[k] = _IndentPrompt(_config.depth, v)
-    repl.completer = _SafeCompleter(repl.completer)
-
-
-_patdb_history_file = pathlib.Path.home() / ".cache" / "patdb" / "history"
-_patdb_history_file.parent.mkdir(parents=True, exist_ok=True)
-_patdb_history_file.touch()
-
-
 class _SafeCompleter(prompt_toolkit.completion.Completer):
     # I found a case where completions raise spurious errors when trying to import a
     # module that cannot be imported.
@@ -966,6 +954,31 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
                 pass
             else:
                 yield completion
+
+
+class _PythonReplNoSave(ptpython.repl.PythonRepl):
+    # We prevent the interactive Python REPL from saving the last value.
+    # This is because it then persists forever, in particular appearing in
+    # `gc.get_referrers`. This is a tool that we like to use when debugging, so
+    # disabling the noise here is more important than keeping a value around.
+    def _store_eval_result(self, result):
+        del result
+
+
+def _ptpython_configure(repl: ptpython.repl.PythonRepl):
+    config = _config.ptpython_config_home
+    if config is not None and os.path.exists(config):
+        ptpython.repl.run_config(repl, config)
+    if _config.depth is not None:
+        for k, v in list(repl.all_prompt_styles.items()):
+            repl.all_prompt_styles[k] = _IndentPrompt(_config.depth, v)
+    repl.completer = _SafeCompleter(repl.completer)
+    repl.__class__ = _PythonReplNoSave
+
+
+_patdb_history_file = pathlib.Path.home() / ".cache" / "patdb" / "history"
+_patdb_history_file.parent.mkdir(parents=True, exist_ok=True)
+_patdb_history_file.touch()
 
 
 #
