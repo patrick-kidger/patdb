@@ -474,8 +474,11 @@ class _Frame:
     def f_globals(self):
         return self._frame.f_globals
 
-    @ft.cache  # Cache result in case we modify the file via `(e)dit`.
-    def get_function_source(self) -> Optional[list[str]]:
+    # Important that these caches be `cached_property` and not `functools.cache`, as the
+    # latter holds on to strong references to the `self` objects.
+
+    @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
+    def function_source(self) -> Optional[list[str]]:
         try:
             lines, _ = inspect.getsourcelines(self._frame)
         except OSError:
@@ -483,8 +486,8 @@ class _Frame:
         else:
             return [line.rstrip() for line in lines]
 
-    @ft.cache  # Cache result in case we modify the file via `(e)dit`.
-    def get_file_source(self) -> Optional[tuple[str, str]]:
+    @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
+    def file_source(self) -> Optional[tuple[str, str]]:
         filename = self.f_code.co_filename
         filepath = pathlib.Path(filename).resolve()
         if filepath.exists():
@@ -496,8 +499,8 @@ class _Frame:
             return None
 
     def cache(self):
-        self.get_function_source()
-        self.get_file_source()
+        self.function_source
+        self.file_source
 
     def set_trace(
         self, line_num: int, trace_hooks: Optional[list[Callable[[], None]]]
@@ -1586,7 +1589,7 @@ def _show_source(
 
 
 def _show_line(frame: _Frame) -> Optional[str]:
-    source_lines = frame.get_function_source()
+    source_lines = frame.function_source
     if source_lines is None:
         return None
     else:
@@ -1841,7 +1844,7 @@ def _show_function(state: _State) -> _State:
     if isinstance(frame, str):
         _echo_first_line(frame)
     else:
-        lines = frame.get_function_source()
+        lines = frame.function_source
         if lines is None:
             _echo_first_line("<no source found>")
         else:
@@ -1882,7 +1885,7 @@ def _show_file(state: _State) -> _State:
     if isinstance(frame, str):
         _echo_first_line(frame)
     else:
-        filepath__source = frame.get_file_source()
+        filepath__source = frame.file_source
         if filepath__source is None:
             _echo_first_line("<no source found>")
         else:
