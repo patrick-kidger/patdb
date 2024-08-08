@@ -93,7 +93,7 @@ def pretty_format(doc: AbstractDoc, width: int) -> str:
     while len(todo) > 0:
         match todo.pop():
             case indent, _, TextDoc(text):
-                outs.append(text.replace("\n", "\n" + " " * indent))
+                outs.append(text.replace("\n", "\n" + " " * width_so_far))
                 width_so_far += max(len(line) for line in text.splitlines())
             case indent, flat, ConcatDoc(children):
                 todo.extend((indent, flat, child) for child in reversed(children))

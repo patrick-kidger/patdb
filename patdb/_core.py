@@ -845,23 +845,6 @@ def _is_frame_frozen(frame: _Frame) -> bool:
     return frame.f_globals.get("__loader__", None) is importlib.machinery.FrozenImporter
 
 
-def _is_frame_nameless(frame: _Frame) -> bool:
-    # Skip the noise from JAX's JaxStackTraceBeforeTransformation causes, which are
-    # highly sus. They're placed out-of-order in the __cause__/__context__ stack because
-    # default `pdb` does a terrible job and orders chained stack frames
-    # nonchronologically, i.e. the exact problem that `patdb` originally set out to fix.
-    # Anyway, this often makes them the root traceback despite not being the root cause,
-    # so we want to skip them by default.
-    return "__name__" not in frame.f_globals
-
-
-def _is_frame_angled(frame: _Frame) -> bool:
-    # In particular `ptpython`'s REPL has the filename listed as `<stdin>`, but (unlike
-    # the normal Python REPL) does not set `__name__`. So we need to carve out an
-    # exception from `_is_frame_nameless`.
-    return frame.f_code.co_filename.startswith("<")
-
-
 def is_frame_pytest(frame: _Frame) -> bool:
     # Skip all of the noise in pytest when using the `--patdb` flag.
     name = frame.f_globals.get("__name__", "")
@@ -878,7 +861,6 @@ def _is_frame_hidden(frame: _Frame) -> bool:
     return (
         frame.f_locals.get("__tracebackhide__", False)
         or _is_frame_frozen(frame)
-        or (_is_frame_nameless(frame) and not _is_frame_angled(frame))
         or is_frame_pytest(frame)
     )
 
@@ -1599,7 +1581,8 @@ def _show_line(frame: _Frame) -> Optional[str]:
         try:
             source_line = source_lines[index]
         except IndexError:
-            # I don't know if this is ever possible, but just in case.
+            # This can happen if the source file is modified between program start and
+            # when the source code is accessed now.
             return None
         else:
             [(source_line, _)] = _format_source(
