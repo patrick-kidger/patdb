@@ -502,72 +502,30 @@ class _Frame:
         self.function_source
         self.file_source
 
-    def set_trace(
-        self, line_num: int, trace_hooks: Optional[list[Callable[[], None]]]
-    ) -> Union[Callable[[], None], str]:
-        # This function is unfortunately side-effect'ing. It will set a trace function
-        # on the relevant frame.
+    def set_trace(self, local_trace_hook) -> Callable[[], None]:
+        self._frame.f_trace = local_trace_hook
+        self._frame.f_trace_lines = True
 
-        if sys.gettrace() not in {None, _null_trace}:
-            return (
-                "The Python runtime already has a global trace function enabled, "
-                "perhaps from some other tool? Cannot jump to other frames."
-            )
-        if self._frame.f_trace is not None:
-            return (
-                "This frame already has a local trace function enabled, perhaps "
-                "from some other tool? Cannot jump to it."
-            )
+        # Don't keep the frame alive just because we want to uninstall its hook! That'd
+        # be superfluous.
+        # We use `self` rather than `self._frame` because frames are not weakref'able.
+        weak_self = weakref.ref(self)
+        # Whilst we're here we also only use a weakref to the trace hook we're
+        # uninstalling. This one probably matters less but seems like the right thing to
+        # do.
+        weak_local_trace_hook = weakref.ref(local_trace_hook)
 
-        # Avoid closing over `self` and keeping it in memory unnecessarily: these trace
-        # hooks may outlive our `patdb.debug` call.
-        self_frame = self._frame
-        del self
+        def uninstall_local_trace_hook():
+            maybe_self = weak_self()
+            maybe_hook = weak_local_trace_hook()
+            if (
+                maybe_self is not None
+                and maybe_hook is not None
+                and maybe_self._frame.f_trace is maybe_hook
+            ):
+                maybe_self._frame.f_trace = None
 
-        def _trace(frame: types.FrameType, event: str, arg):
-            del frame, arg
-            if event == "line" and self_frame.f_lineno == line_num:
-                if sys.gettrace() is _null_trace:
-                    sys.settrace(None)
-                else:
-                    click.echo(
-                        "Warning: some tool (other than `patdb`) has set "
-                        "`sys.settrace` whilst jumping between frames. The other "
-                        "tool's global trace function has been left in place, but "
-                        "nonetheless you may see unexpected behaviour."
-                    )
-                if trace_hooks is None:
-                    _uninstall_local_trace()
-                else:
-                    # In particular this is useful when you have made multiple calls to
-                    # `.set_trace` on multiple frames, and want to uninstall all of them
-                    # as soon as one of them is triggered.
-                    for hook in trace_hooks:
-                        hook()
-                debug(self_frame)
-
-        def _uninstall_local_trace():
-            if self_frame.f_trace is _trace:
-                self_frame.f_trace = None
-                self_frame.f_trace_lines = False
-            else:
-                # E.g. if another tool grabs `frame.f_trace` and wraps it.
-                click.echo(
-                    "Warning: some tool (other than `patdb`) has set `frame.f_trace` "
-                    "whilst jumping frames. You may see unexpected behaviour. The "
-                    "other tool's local trace function has been left in place, but "
-                    "nonetheless you may see unexpected behaviour."
-                )
-
-        # We need to install a global trace hook, otherwise the local trace hooks will
-        # not be checked.
-        # "Note that in order for this to work, a global tracing function must have been
-        # installed with settrace()"
-        # https://docs.python.org/3/library/sys.html#sys.settrace
-        sys.settrace(_null_trace)
-        self_frame.f_trace = _trace
-        self_frame.f_trace_lines = True
-        return _uninstall_local_trace
+        return uninstall_local_trace_hook
 
 
 class _CallstackKind(enum.Enum):
@@ -614,13 +572,41 @@ def _next_call_trace(done_cell: list[bool], frame: types.FrameType, event: str, 
         trace = sys.gettrace()
         if type(trace) is ft.partial and trace.func is _next_call_trace:
             sys.settrace(None)
-            debug(frame)
         else:
             click.echo(
                 "Warning: some tool (other than `patdb`) has set `sys.settrace` whilst "
                 "jumping between frames. The other tool's global trace function has "
                 "been left in place, but nonetheless you may see unexpected behaviour."
             )
+        debug(frame)
+
+
+def _line_trace(
+    line_num: int,
+    uninstall_hooks: list[Callable[[], None]],
+    frame: types.FrameType,
+    event: str,
+    arg,
+):
+    del arg
+    if event == "line" and frame.f_lineno == line_num:
+        # We've found where we need to be, so uninstall all our hooks.
+        for hook in uninstall_hooks:
+            hook()
+        debug(frame)
+
+
+def _file_trace(
+    filepath: pathlib.Path,
+    line_num: int,
+    uninstall_hooks: list[Callable[[], None]],
+    frame: types.FrameType,
+    event: str,
+    arg,
+):
+    del arg
+    if event == "call" and pathlib.Path(frame.f_code.co_filename).resolve() == filepath:
+        return ft.partial(_line_trace, line_num, uninstall_hooks)
 
 
 def _get_callstacks_from_error(
@@ -1603,6 +1589,73 @@ def _show_line(frame: _Frame) -> Optional[str]:
             return source_line + "\x1b[K"
 
 
+def _install_trace(
+    filepath: pathlib.Path, jump_line_num: Optional[int], state: _State
+) -> _State:
+    if sys.gettrace() is None:
+        if jump_line_num is None:
+            # Jump inside the next call
+            sys.settrace(ft.partial(_next_call_trace, state.done_cell))
+        else:
+            # Jump to a higher stack frame.
+
+            # This is slightly finickity in that we need to install several hooks.
+            # We need to install:
+            # - frame-local trace hooks into all current frames (that have the right
+            #   `filepath`), as the global trace hook won't trigger for already-created
+            #   frames.
+            # - a global trace hook, in case new frames (with the right `filepath`) are
+            #   created later. Any kind of global trace hook is *also* needed to trigger
+            #   local trace hooks. (Otherwise the Python intepreter doesn't call them
+            #   at all.)
+            #
+            # Once we've found where we want to be then we want to uninstall all of the
+            # hooks. So we create a mutable `uninstall_hooks` list that every hook has
+            # a reference to. Once any of them trigger, they are all uninstalled.
+
+            uninstall_hooks = []
+            global_hook = ft.partial(
+                _file_trace, filepath, jump_line_num, uninstall_hooks
+            )
+            sys.settrace(global_hook)
+            # Avoid keeping a strong reference to `global_hook`. Probably not important
+            # but the only thing the uninstaller does is to remove it, so it seems like
+            # good manners.
+            weak_global_hook = weakref.ref(global_hook)
+
+            def uninstall_global_hook():
+                maybe_global_hook = weak_global_hook()
+                if (
+                    maybe_global_hook is not None
+                    and sys.gettrace() is maybe_global_hook
+                ):
+                    # In principle someone else may have modified the global trace hook
+                    # in between the `_file_trace` installing the local trace hook, and
+                    # the local trace hook triggering.
+                    # So we only uninstall the global one if it's actually ours.
+                    # Otherwise we just skip it.
+                    sys.settrace(None)
+
+            uninstall_hooks.append(uninstall_global_hook)
+
+            def install_local_hook(f: _Frame):
+                local_hook = ft.partial(_line_trace, jump_line_num, uninstall_hooks)
+                uninstall_hooks.append(f.set_trace(local_hook))
+
+            _apply_to_frames_with_path(
+                state.root_callstack, filepath, install_local_hook
+            )
+        return dataclasses.replace(state, done=True)
+    else:
+        _echo_first_line(
+            "The Python runtime already has a global trace function "
+            "enabled, perhaps from some other tool? Cannot jump to "
+            "other frames."
+        )
+        _echo_newline_end_command()
+        return state
+
+
 def _update_and_display_move(
     move: _MoveLocation,
     state: _State,
@@ -1848,26 +1901,18 @@ def _show_function(state: _State) -> _State:
                 lines, frame.f_code.co_firstlineno, frame.line, state.depth
             )
             if should_jump and jump_line_num != frame.line:
-                if jump_line_num is None:
-                    # Jump inside the next call
-                    if sys.gettrace() is None:
-                        sys.settrace(ft.partial(_next_call_trace, state.done_cell))
-                        state = dataclasses.replace(state, done=True)
-                    else:
-                        _echo_first_line(
-                            "The Python runtime already has a global trace function "
-                            "enabled, perhaps from some other tool? Cannot jump to "
-                            "other frames."
-                        )
-                        _echo_newline_end_command()
-                else:
-                    # Jump to a higher stack frame.
-                    result = frame.set_trace(jump_line_num, None)
-                    if callable(result):
-                        state = dataclasses.replace(state, done=True)
-                    else:
-                        _echo_first_line(result)
-                        _echo_newline_end_command()
+                # Note that we choose to modify the global trace hook here, *not* the
+                # frame-local trace hook (i.e. setting `frame.f_trace = ...`, along with
+                # a low-overhead global trace hook and `frame.f_trace_lines = True`).
+                #
+                # The reason is that we may have a closed-over function inside of our
+                # current function, and if we select one of its lines then we'd actually
+                # like to stop inside of that function instead.
+                # That is, we're not necessarily going to be stopping somewhere inside
+                # the current frame. So a single frame-local trace hook is not
+                # appropriate.
+                filepath = pathlib.Path(frame.f_code.co_filename).resolve()
+                state = _install_trace(filepath, jump_line_num, state)
     return state
 
 
@@ -1891,31 +1936,8 @@ def _show_file(state: _State) -> _State:
             )
             assert jump_line_num is not None
             if should_jump and jump_line_num != frame.line:
-                # This is a bit finickity. We set `frame.f_trace` for every frame that
-                # uses this file. We additionally need all of the trace functions to
-                # have references to all of the other trace functions, so that as soon
-                # as one of them is called, they can all be uninstalled. As such we keep
-                # a a list of hooks, which is mutated in-place, to tie the knot.
-                uninstall_hooks = []
-                errors = []
-
-                def set_trace(frame: _Frame):
-                    result = frame.set_trace(jump_line_num, uninstall_hooks)
-                    if callable(result):
-                        uninstall_hooks.append(result)
-                    else:
-                        errors.append(result)
-
-                _apply_to_frames_with_path(
-                    state.root_callstack, pathlib.Path(filepath).resolve(), set_trace
-                )
-                if len(errors) == 0:
-                    state = dataclasses.replace(state, done=True)
-                else:
-                    _echo_first_line("\n".join(errors))
-                    _echo_newline_end_command()
-                    for hook in uninstall_hooks:
-                        hook()
+                filepath = pathlib.Path(frame.f_code.co_filename).resolve()
+                state = _install_trace(filepath, jump_line_num, state)
     return state
 
 
