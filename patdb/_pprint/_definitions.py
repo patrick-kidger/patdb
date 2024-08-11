@@ -16,6 +16,14 @@ from ._wadler_lindig import (
 )
 
 
+class _WithRepr:
+    def __init__(self, string: str):
+        self.string = string
+
+    def __repr__(self) -> str:
+        return self.string
+
+
 def join(sep: AbstractDoc, objs: Sequence[AbstractDoc]):
     if len(objs) == 0:
         return ConcatDoc()
@@ -161,7 +169,7 @@ def _pformat_function(obj: types.FunctionType, **kwargs) -> AbstractDoc:
 def _pformat_dataclass(obj, **kwargs) -> AbstractDoc:
     objs = named_objs(
         [
-            (field.name, getattr(obj, field.name))
+            (field.name, getattr(obj, field.name, _WithRepr("<uninitialised>")))
             for field in dataclasses.fields(obj)
             if field.repr
         ],
