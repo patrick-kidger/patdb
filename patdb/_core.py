@@ -932,11 +932,23 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
         completions = iter(self.completer.get_completions(document, complete_event))
         while True:
             try:
-                completion = next(completions)
+                # Unconditionally override the breakpointhook. At this point
+                # `prompt_toolkit` will have set it to its own wrapper. But we don't
+                # ever want breakpoints to trigger when getting completions, so we
+                # disable it.
+                breakpointhook = sys.breakpointhook
+                sys.breakpointhook = lambda *a, **kw: None
+                try:
+                    completion = next(completions)
+                finally:
+                    sys.breakpointhook = breakpointhook
             except StopIteration:
                 break
             except Exception:
-                pass
+                # Something went wrong. Probably we're in some kind of broken
+                # environment, for which Jedi cannot dynamically import in order to find
+                # its completions. In this case just give up.
+                break
             else:
                 yield completion
 
