@@ -8,6 +8,7 @@ import functools as ft
 import gc
 import importlib.machinery
 import inspect
+import logging
 import operator
 import os
 import pathlib
@@ -21,7 +22,7 @@ import traceback
 import types
 import weakref
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any, Literal, NoReturn, Optional, overload, TypeVar, Union
+from typing import Any, Generic, Literal, NoReturn, Optional, overload, TypeVar, Union
 from typing_extensions import Self, TypeGuard
 
 import click
@@ -427,14 +428,31 @@ def _echo_newline_end_command():
 #
 
 
-class ExcThread(threading.Thread):
-    exc = None
+_T = TypeVar("_T")
 
-    def run(self, *args, **kwargs):
-        try:
-            super().run(*args, **kwargs)
-        except Exception as exc:
-            self.exc = exc
+
+class _BetterThread(threading.Thread, Generic[_T]):
+    returnval: Any
+    exc: BaseException
+
+    def __init__(self, *, target: Callable[[], _T]):
+        def _target():
+            try:
+                self.returnval = target()
+            except BaseException as exc:
+                self.exc = exc
+
+        super().__init__(target=_target)
+
+    def evaluate(self) -> _T:
+        self.start()
+        self.join()
+        if hasattr(self, "exc"):
+            raise self.exc
+        elif hasattr(self, "returnval"):
+            return self.returnval
+        else:
+            assert False
 
 
 #
@@ -903,6 +921,29 @@ class _IndentPrompt(ptpython.prompt_style.PromptStyle):
         return out
 
 
+# We disable logging in a few places where the libraries are calling produce log output.
+# In practice we assume that our debugger is robust. We would like all logging to come
+# only from the user's code.
+@contextlib.contextmanager
+def _disable_logging():
+    level = logging.root.manager.disable
+    logging.disable(logging.INFO)
+    try:
+        yield
+    finally:
+        logging.disable(level)
+
+
+@contextlib.contextmanager
+def _override_breakpointhook():
+    breakpointhook = sys.breakpointhook
+    sys.breakpointhook = lambda *a, **kw: None
+    try:
+        yield
+    finally:
+        sys.breakpointhook = breakpointhook
+
+
 class _SafeCompleter(prompt_toolkit.completion.Completer):
     # I found a case where completions raise spurious errors when trying to import a
     # module that cannot be imported.
@@ -915,19 +956,16 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
         document: prompt_toolkit.document.Document,
         complete_event: prompt_toolkit.completion.CompleteEvent,
     ) -> Iterable[prompt_toolkit.completion.Completion]:
-        completions = iter(self.completer.get_completions(document, complete_event))
+        with _disable_logging():
+            completions = iter(self.completer.get_completions(document, complete_event))
         while True:
             try:
                 # Unconditionally override the breakpointhook. At this point
                 # `prompt_toolkit` will have set it to its own wrapper. But we don't
                 # ever want breakpoints to trigger when getting completions, so we
                 # disable it.
-                breakpointhook = sys.breakpointhook
-                sys.breakpointhook = lambda *a, **kw: None
-                try:
+                with _override_breakpointhook(), _disable_logging():
                     completion = next(completions)
-                finally:
-                    sys.breakpointhook = breakpointhook
             except StopIteration:
                 break
             except Exception:
@@ -1005,6 +1043,14 @@ def _format_text_for_basic_app(
     if len(formatted_text) > 0:
         formatted_text.pop()
     return formatted_text
+
+
+def _app_run(app):
+    def _run():
+        with _disable_logging():
+            app.run()
+
+    return _run
 
 
 def _basic_app(
@@ -1086,7 +1132,7 @@ def _basic_app(
                 infos.append("; ")
     _echo_later_lines(_patdb_info("".join(infos), depth))
     click.echo("")
-    t = threading.Thread(target=app.run)
+    t = threading.Thread(target=_app_run(app))
     t.start()
     t.join()
     return carry
@@ -2168,7 +2214,12 @@ def _print(state: _State) -> _State:
         output=output,
     )
     try:
-        text = session.prompt()
+        with _disable_logging():
+            # We launch this in a thread because `prompt_toolkit` calls into the current
+            # asyncio loop. We don't want to do this -- we want to run our whole prompt
+            # in blocking fashion -- so we need to run the whole thing with a new loop,
+            # which necessarily means a new thread.
+            text = _BetterThread(target=session.prompt).evaluate()
     except (EOFError, KeyboardInterrupt):
         return state
     text_strip = text.strip()
@@ -2275,12 +2326,13 @@ def _interpret(state: _State) -> _State:
     }
     try:
         _echo_later_lines("")
-        ptpython.repl.embed(
-            globals,
-            locals,
-            configure=_ptpython_configure,
-            history_filename=str(_patdb_history_file),
-        )
+        with _disable_logging():
+            ptpython.repl.embed(
+                globals,
+                locals,
+                configure=_ptpython_configure,
+                history_filename=str(_patdb_history_file),
+            )
     except SystemExit:
         pass
     finally:
@@ -2627,24 +2679,20 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     with _depth_context(state.depth):
         while not state.done:
             click.echo(prompt, nl=False)
-            t = ExcThread(target=app.run)
-            t.start()
-            t.join()
-            if t.exc is not None:
-                if type(t.exc) is EOFError:
-                    raise RuntimeError(
-                        "Could not start the debugger, probably because it could not "
-                        "connect to `sys.{stdin,stdout}`.\n"
-                        "If you are using `breakpoint()` or `patdb.debug()` from "
-                        "within `pytest`, then this can be fixed by adding the `-s` "
-                        "flag.\n"
-                        "If you are using `patdb` from within an environment like "
-                        "Jupyter or Marimo, then unfortunately these are not "
-                        "compatible with `patdb`, as these environments do not support "
-                        "terminal emulation capabilities."
-                    ) from t.exc
-                else:
-                    raise t.exc
+            try:
+                _BetterThread(target=_app_run(app)).evaluate()
+            except EOFError as e:
+                raise RuntimeError(
+                    "Could not start the debugger, probably because it could not "
+                    "connect to `sys.{stdin,stdout}`.\n"
+                    "If you are using `breakpoint()` or `patdb.debug()` from "
+                    "within `pytest`, then this can be fixed by adding the `-s` "
+                    "flag.\n"
+                    "If you are using `patdb` from within an environment like "
+                    "Jupyter or Marimo, then unfortunately these are not "
+                    "compatible with `patdb`, as these environments do not support "
+                    "terminal emulation capabilities."
+                ) from e
             assert detected_fn is not None
             assert detected_keys is not None
             # Convention on \n:
