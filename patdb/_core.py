@@ -2471,6 +2471,18 @@ def debug(*args, stacklevel: int = 1):
     done_cell[0] = True
 
 
+# In case we're using this in a multithread context.
+# Use an RLock, not a Lock, to allow for nested debuggers.
+_lock = threading.RLock()
+
+
+@contextlib.contextmanager
+def _with_lock():
+    with _lock:
+        yield
+
+
+@_with_lock()
 def _debug(*args, stacklevel: int) -> list[bool]:
     # When using `pytest` -> `breakpoint()` -> `(q)uit`, it shows the visible stack
     # frames in between.
@@ -2527,9 +2539,11 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     else:
         if e is None:
             # Called as an explicit `breakpoint()`.
+            # `2 + stacklevel` to escape (a) our threading lock and (b) the nested
+            # `_debug` call.
             frames = tuple(
                 _Frame(x.frame, x.frame.f_lineno)
-                for x in inspect.stack()[1 + stacklevel :][::-1]
+                for x in inspect.stack()[2 + stacklevel :][::-1]
             )
         elif isinstance(e, types.FrameType):
             frames = []
