@@ -455,6 +455,18 @@ class _BetterThread(threading.Thread, Generic[_T]):
             assert False
 
 
+def _safe_run_in_thread(fn):
+    # We must override the breakpointhook to be sure that we don't call back into
+    # another breakpoint, which would call `patdb.debug` from another thread, which
+    # would then deadlock -- as our current thread holds the rlock.
+    # Thus `_safe_run_in_thread` should only be used in places where we don't ever want
+    # to re-breakpoint.
+    fn = _override_breakpointhook(lambda *a, **k: None)(fn)
+    # `prompt_toolkit` has some DEBUG logs that we want to suppress.
+    fn = _disable_logging()(fn)
+    return _BetterThread(target=fn).evaluate()
+
+
 #
 # Managing callstacks and frames
 #
@@ -491,6 +503,11 @@ class _Frame:
     @property
     def f_globals(self):
         return self._frame.f_globals
+
+    @property
+    def local_varnames(self) -> set[str]:
+        # https://stackoverflow.com/questions/61550012/why-doesnt-co-varnames-return-list-of-all-the-variable-names
+        return set(self._frame.f_code.co_varnames + self._frame.f_code.co_cellvars)
 
     # Important that these caches be `cached_property` and not `functools.cache`, as the
     # latter holds on to strong references to the `self` objects.
@@ -863,7 +880,28 @@ def is_frame_pytest(frame: _Frame) -> bool:
 
 def _is_frame_hidden(frame: _Frame) -> bool:
     return (
-        frame.f_locals.get("__tracebackhide__", False)
+        # Do not access `frame.f_locals`! Avoids the following issue:
+        # ```python
+        # import gc
+        # import weakref
+        #
+        # class Foo:
+        #     pass
+        #
+        # def f():
+        #     x = Foo()
+        #     y = weakref.ref(x)
+        #     locals()  # or access `sys._getframe().f_locals`
+        #     del x
+        #     gc.collect()
+        #     # Python >=3.13: dead reference
+        #     # Python <3.13: live reference
+        #     # See https://github.com/python/cpython/issues/50366 and PEP667.
+        #     print(y)
+        #
+        # f()
+        # ```
+        "__tracebackhide__" in frame.local_varnames
         or _is_frame_frozen(frame)
         or is_frame_pytest(frame)
     )
@@ -935,9 +973,9 @@ def _disable_logging():
 
 
 @contextlib.contextmanager
-def _override_breakpointhook():
+def _override_breakpointhook(hook):
     breakpointhook = sys.breakpointhook
-    sys.breakpointhook = lambda *a, **kw: None
+    sys.breakpointhook = hook
     try:
         yield
     finally:
@@ -960,11 +998,9 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
             completions = iter(self.completer.get_completions(document, complete_event))
         while True:
             try:
-                # Unconditionally override the breakpointhook. At this point
-                # `prompt_toolkit` will have set it to its own wrapper. But we don't
-                # ever want breakpoints to trigger when getting completions, so we
-                # disable it.
-                with _override_breakpointhook(), _disable_logging():
+                # We don't ever want breakpoints to trigger when getting completions, so
+                # we disable it.
+                with _override_breakpointhook(lambda *a, **k: None), _disable_logging():
                     completion = next(completions)
             except StopIteration:
                 break
@@ -1043,14 +1079,6 @@ def _format_text_for_basic_app(
     if len(formatted_text) > 0:
         formatted_text.pop()
     return formatted_text
-
-
-def _app_run(app):
-    def _run():
-        with _disable_logging():
-            app.run()
-
-    return _run
 
 
 def _basic_app(
@@ -1132,9 +1160,7 @@ def _basic_app(
                 infos.append("; ")
     _echo_later_lines(_patdb_info("".join(infos), depth))
     click.echo("")
-    t = threading.Thread(target=_app_run(app))
-    t.start()
-    t.join()
+    _safe_run_in_thread(app.run)
     return carry
 
 
@@ -2214,12 +2240,11 @@ def _print(state: _State) -> _State:
         output=output,
     )
     try:
-        with _disable_logging():
-            # We launch this in a thread because `prompt_toolkit` calls into the current
-            # asyncio loop. We don't want to do this -- we want to run our whole prompt
-            # in blocking fashion -- so we need to run the whole thing with a new loop,
-            # which necessarily means a new thread.
-            text = _BetterThread(target=session.prompt).evaluate()
+        # We launch this in a thread because `prompt_toolkit` calls into the current
+        # asyncio loop. We don't want to do this -- we want to run our whole prompt
+        # in blocking fashion -- so we need to run the whole thing with a new loop,
+        # which necessarily means a new thread.
+        text = _safe_run_in_thread(session.prompt)
     except (EOFError, KeyboardInterrupt):
         return state
     text_strip = text.strip()
@@ -2471,18 +2496,29 @@ def debug(*args, stacklevel: int = 1):
     done_cell[0] = True
 
 
-# In case we're using this in a multithread context.
-# Use an RLock, not a Lock, to allow for nested debuggers.
-_lock = threading.RLock()
+_metalock = threading.Lock()
+_locks = {}
 
 
+# We parameterize our locks by depth. This is basically an improvement over using an
+# RLock, in that nested calls to `debug` will work regardless of whether we create them
+# in the same thread or not.
 @contextlib.contextmanager
-def _with_lock():
-    with _lock:
+def _one_breakpoint_at_a_time():
+    with _metalock:
+        try:
+            lock = _locks[_config.depth]
+        except KeyError:
+            lock = _locks[_config.depth] = threading.Lock()
+    with lock:
         yield
 
 
-@_with_lock()
+@_one_breakpoint_at_a_time()
+# `prompt_toolkit` has its own hook that it will set sometimes.
+# In some multithreaded programs it seems that it is possible (somehow?) for that hook
+# to be the current one whilst another thread triggers the breakpoint.
+@_override_breakpointhook(debug)
 def _debug(*args, stacklevel: int) -> list[bool]:
     # When using `pytest` -> `breakpoint()` -> `(q)uit`, it shows the visible stack
     # frames in between.
@@ -2539,11 +2575,11 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     else:
         if e is None:
             # Called as an explicit `breakpoint()`.
-            # `2 + stacklevel` to escape (a) our threading lock and (b) the nested
-            # `_debug` call.
+            # `3 + stacklevel` to escape (a) our threading lock and (b) our breakpoint
+            # override and (c) the nested `_debug` call.
             frames = tuple(
                 _Frame(x.frame, x.frame.f_lineno)
-                for x in inspect.stack()[2 + stacklevel :][::-1]
+                for x in inspect.stack()[3 + stacklevel :][::-1]
             )
         elif isinstance(e, types.FrameType):
             frames = []
@@ -2694,7 +2730,7 @@ def _debug(*args, stacklevel: int) -> list[bool]:
         while not state.done:
             click.echo(prompt, nl=False)
             try:
-                _BetterThread(target=_app_run(app)).evaluate()
+                _safe_run_in_thread(app.run)
             except EOFError as e:
                 raise RuntimeError(
                     "Could not start the debugger, probably because it could not "
