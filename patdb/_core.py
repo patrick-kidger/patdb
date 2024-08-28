@@ -456,11 +456,7 @@ class _BetterThread(threading.Thread, Generic[_T]):
 
 
 def _safe_run_in_thread(fn):
-    # We must override the breakpointhook to be sure that we don't call back into
-    # another breakpoint, which would call `patdb.debug` from another thread, which
-    # would then deadlock -- as our current thread holds the rlock.
-    # Thus `_safe_run_in_thread` should only be used in places where we don't ever want
-    # to re-breakpoint.
+    # `_safe_run_in_thread` should be used where we don't want to re-breakpoint.
     fn = _override_breakpointhook(lambda *a, **k: None)(fn)
     # `prompt_toolkit` has some DEBUG logs that we want to suppress.
     fn = _disable_logging()(fn)
@@ -522,14 +518,14 @@ class _Frame:
             return [line.rstrip() for line in lines]
 
     @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
-    def file_source(self) -> Optional[tuple[str, str]]:
+    def file_source(self) -> Optional[tuple[str, list[str]]]:
         filename = self.f_code.co_filename
         filepath = pathlib.Path(filename).resolve()
         if filepath.exists():
             source = filepath.read_text().rstrip()
             # Return the raw `filename`, not `filepath`. This is the 'pretty'
             # (unresolved) path.
-            return filename, source
+            return filename, source.splitlines()
         else:
             return None
 
@@ -1641,15 +1637,16 @@ def _show_source(
 
 
 def _show_line(frame: _Frame) -> Optional[str]:
-    source_lines = frame.function_source
-    if source_lines is None:
+    # Uses the file source, and not function source, because otherwise we get incorrect
+    # results for generators: https://github.com/python/cpython/issues/121331
+    filepath__source = frame.file_source
+    if filepath__source is None:
         return None
     else:
-        index = frame.line - frame.f_code.co_firstlineno
-        if index < 0:
-            return None
+        _, source = filepath__source
         try:
-            source_line = source_lines[index]
+            # -1 because line numbering starts from 1 but lists are index from 0.
+            source_line = source[frame.line - 1]
         except IndexError:
             # This can happen if the source file is modified between program start and
             # when the source code is accessed now.
@@ -2004,7 +2001,7 @@ def _show_file(state: _State) -> _State:
             filepath, source = filepath__source
             _echo_first_line(_bold(filepath))
             jump_line_num, should_jump = _show_source(
-                source.splitlines(), 1, frame.line, state.depth
+                source, 1, frame.line, state.depth
             )
             assert jump_line_num is not None
             if should_jump and jump_line_num != frame.line:
@@ -2514,11 +2511,13 @@ def _one_breakpoint_at_a_time():
         yield
 
 
+# Ensure that we work in multithreaded contexts.
 @_one_breakpoint_at_a_time()
-# `prompt_toolkit` has its own hook that it will set sometimes.
-# In some multithreaded programs it seems that it is possible (somehow?) for that hook
-# to be the current one whilst another thread triggers the breakpoint.
-@_override_breakpointhook(debug)
+# Disable breakpoints during initial set-up of `_debug`. We'll re-enable this when we
+# enter the patdb REPL.
+# This is to avoid infinite loops, in case we should happen to encounter a breakpoint
+# during initial set-up.
+@_override_breakpointhook(lambda *a, **kw: None)
 def _debug(*args, stacklevel: int) -> list[bool]:
     # When using `pytest` -> `breakpoint()` -> `(q)uit`, it shows the visible stack
     # frames in between.
@@ -2530,10 +2529,16 @@ def _debug(*args, stacklevel: int) -> list[bool]:
 
     e: Union[None, BaseException, types.TracebackType, types.FrameType]
     if len(args) == 0:
+        # `debug()`
+        # i.e. when `sys.breakpointhook = debug`
         e = None
     elif len(args) == 1:
+        # `debug(some_exception)`, `debug(some_traceback)`, `debug(some_frame)`
+        # i.e. when called manually
         [e] = args
     elif len(args) == 3:
+        # `debug(some_exception_type, some_exception, some_traceback)`
+        # i.e. when `sys.excepthook = debug`
         _, e, _ = args
     else:
         raise TypeError(
@@ -2710,57 +2715,65 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     #
     # Step 6: run the REPL!
     #
-    container = prompt_toolkit.layout.containers.Window(
-        content=prompt_toolkit.layout.controls.DummyControl()
-    )
-    layout = prompt_toolkit.layout.Layout(container)
-    output = prompt_toolkit.output.create_output()
-    if hasattr(output, "enable_cpr"):
-        output.enable_cpr = False  # pyright: ignore[reportAttributeAccessIssue]
-    app = prompt_toolkit.Application(
-        full_screen=False,
-        layout=layout,
-        key_bindings=key_bindings,
-        include_default_pygments_style=False,
-        output=output,
-    )
-    prompt = _patdb_prompt(state.depth)
 
-    with _depth_context(state.depth):
-        while not state.done:
-            click.echo(prompt, nl=False)
-            try:
-                _safe_run_in_thread(app.run)
-            except EOFError as e:
-                raise RuntimeError(
-                    "Could not start the debugger, probably because it could not "
-                    "connect to `sys.{stdin,stdout}`.\n"
-                    "If you are using `breakpoint()` or `patdb.debug()` from "
-                    "within `pytest`, then this can be fixed by adding the `-s` "
-                    "flag.\n"
-                    "If you are using `patdb` from within an environment like "
-                    "Jupyter or Marimo, then unfortunately these are not "
-                    "compatible with `patdb`, as these environments do not support "
-                    "terminal emulation capabilities."
-                ) from e
-            assert detected_fn is not None
-            assert detected_keys is not None
-            # Convention on \n:
-            #
-            # We split up the response of each command into the "first line" (appears on
-            # the same line as the prompt and the detected keys) and the "later lines"
-            # (appears on subsequent lines).
-            # Every command should call the `_echo_first_line` or `_echo_later_lines`
-            # functions to do the right thing.
-            # Every command should end with a call to `_echo_newline_end_command` to
-            # insert the newline for the next prompt.
-            #
-            # We let each command handle doing this, as someone of them call out to
-            # other processes, which don't always do consistent things. This offers some
-            # wiggle room as an escape hatch. (E.g. `interact` leaves off
-            # `_echo_newline_end_command`).
-            click.echo(f"{detected_keys}: ", nl=False)
-            state = detected_fn(state)
+    # `prompt_toolkit` has its own hook that it will set sometimes.
+    # In some multithreaded programs it seems that it is possible (somehow?) for that
+    # hook to be the current one whilst another thread triggers the breakpoint.
+    #
+    # We only set this here in case we enter a `breakpoint()` during the initial set-up
+    # of this function.
+    with _override_breakpointhook(debug):
+        container = prompt_toolkit.layout.containers.Window(
+            content=prompt_toolkit.layout.controls.DummyControl()
+        )
+        layout = prompt_toolkit.layout.Layout(container)
+        output = prompt_toolkit.output.create_output()
+        if hasattr(output, "enable_cpr"):
+            output.enable_cpr = False  # pyright: ignore[reportAttributeAccessIssue]
+        app = prompt_toolkit.Application(
+            full_screen=False,
+            layout=layout,
+            key_bindings=key_bindings,
+            include_default_pygments_style=False,
+            output=output,
+        )
+        prompt = _patdb_prompt(state.depth)
+
+        with _depth_context(state.depth):
+            while not state.done:
+                click.echo(prompt, nl=False)
+                try:
+                    _safe_run_in_thread(app.run)
+                except EOFError as e:
+                    raise RuntimeError(
+                        "Could not start the debugger, probably because it could not "
+                        "connect to `sys.{stdin,stdout}`.\n"
+                        "If you are using `breakpoint()` or `patdb.debug()` from "
+                        "within `pytest`, then this can be fixed by adding the `-s` "
+                        "flag.\n"
+                        "If you are using `patdb` from within an environment like "
+                        "Jupyter or Marimo, then unfortunately these are not "
+                        "compatible with `patdb`, as these environments do not support "
+                        "terminal emulation capabilities."
+                    ) from e
+                assert detected_fn is not None
+                assert detected_keys is not None
+                # Convention on \n:
+                #
+                # We split up the response of each command into the "first line"
+                # (appears on the same line as the prompt and the detected keys) and the
+                # "later lines" (appears on subsequent lines).
+                # Every command should call the `_echo_first_line` or
+                # `_echo_later_lines` functions to do the right thing.
+                # Every command should end with a call to `_echo_newline_end_command` to
+                # insert the newline for the next prompt.
+                #
+                # We let each command handle doing this, as someone of them call out to
+                # other processes, which don't always do consistent things. This offers
+                # some wiggle room as an escape hatch. (E.g. `interact` leaves off
+                # `_echo_newline_end_command`).
+                click.echo(f"{detected_keys}: ", nl=False)
+                state = detected_fn(state)
 
     # We have a variable here that we explicitly hang on to for the lifetime of `debug`.
     # This `del` is used as a static assertion (for pyright) that it has *not* been

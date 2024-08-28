@@ -1,4 +1,5 @@
 import dataclasses
+import difflib
 import functools as ft
 import sys
 import types
@@ -328,26 +329,13 @@ def pformat(
     return pretty_format(doc, width)
 
 
-def pprint(
-    obj: Any,
-    *,
-    width: int = 88,
-    indent: int = 2,
-    follow_wrapped: bool = True,
-    short_arrays: bool = True,
-    custom: Callable[[Any], None | AbstractDoc] = lambda _: None,
-    **kwargs,
-) -> None:
+def pprint(obj: Any, **kwargs) -> None:
     """As `pformat`, but prints its result to stdout."""
+    print(pformat(obj, **kwargs))
 
-    print(
-        pformat(
-            obj,
-            width=width,
-            indent=indent,
-            follow_wrapped=follow_wrapped,
-            short_arrays=short_arrays,
-            custom=custom,
-            *kwargs,
-        )
-    )
+
+def pdiff(p_minus: str, p_plus: str) -> str:
+    """Prints a pretty-diff between two objects."""
+    diff = difflib.ndiff(p_minus.splitlines(), p_plus.splitlines())
+    diff = "\n".join(line for line in diff if not line.startswith("?"))
+    return diff
