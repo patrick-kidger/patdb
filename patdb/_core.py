@@ -876,7 +876,7 @@ def is_frame_pytest(frame: _Frame) -> bool:
 
 def _is_frame_hidden(frame: _Frame) -> bool:
     return (
-        # Do not access `frame.f_locals`! Avoids the following issue:
+        # Do not access `frame.f_locals`! Avoids the following issue on Python <3.13:
         # ```python
         # import gc
         # import weakref
@@ -2668,7 +2668,18 @@ def _debug(*args, stacklevel: int) -> list[bool]:
         # I experimented with starting at the bottommost callstack instead, but the
         # difference didn't seem that important, and consistency with `pdb` here might
         # offer a better UX?
-        frame_idx = len(root_callstack.frames) - 1
+        bottom_frame_idx = frame_idx = len(root_callstack.frames) - 1
+        while True:
+            if _is_frame_hidden(root_callstack.frames[frame_idx]):
+                if frame_idx == 0:
+                    # Could not find any unhidden frames. Default to the bottom one.
+                    frame_idx = bottom_frame_idx
+                    break
+                else:
+                    frame_idx -= 1
+            else:
+                # Found our bottommost unhidden frame.
+                break
     state = _State(
         # Replaceable
         done=False,
