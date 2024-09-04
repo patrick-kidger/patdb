@@ -3,7 +3,7 @@ import difflib
 import functools as ft
 import sys
 import types
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, cast, NamedTuple
 
 from ._wadler_lindig import (
@@ -25,6 +25,9 @@ class _WithRepr:
         return self.string
 
 
+comma = ConcatDoc(TextDoc(","), BreakDoc(" "))
+
+
 def join(sep: AbstractDoc, objs: Sequence[AbstractDoc]):
     if len(objs) == 0:
         return ConcatDoc()
@@ -43,7 +46,6 @@ def bracketed(
     lbracket: str,
     rbracket: str,
 ) -> AbstractDoc:
-    comma = ConcatDoc(TextDoc(","), BreakDoc(" "))
     objs = [GroupDoc(x) for x in objs]
     nested = ConcatDoc(
         NestDoc(ConcatDoc(BreakDoc(""), join(comma, objs)), indent), BreakDoc("")
@@ -55,7 +57,7 @@ def bracketed(
     return GroupDoc(ConcatDoc(*pieces))
 
 
-def named_objs(pairs, **kwargs):
+def named_objs(pairs: Iterable[tuple[Any, Any]], **kwargs):
     return [
         ConcatDoc(TextDoc(key), TextDoc("="), pdoc(value, **kwargs))
         for key, value in pairs
@@ -231,6 +233,7 @@ def pdoc(
     kwargs["indent"] = indent
     kwargs["follow_wrapped"] = follow_wrapped
     kwargs["short_arrays"] = short_arrays
+    kwargs["custom"] = custom
 
     if isinstance(obj, AbstractDoc):
         return obj
@@ -239,14 +242,11 @@ def pdoc(
     if maybe_custom is not None:
         return maybe_custom
 
-    if hasattr(obj, "__pp__"):
+    if hasattr(type(obj), "__pp__"):
         custom_pp = obj.__pp__(**kwargs)
         if isinstance(custom_pp, AbstractDoc):
             return GroupDoc(custom_pp)
-        elif custom_pp is NotImplemented:
-            pass
-        else:
-            return pdoc(custom_pp, **kwargs)
+        # else it's some non-pretty-print `__pp__` method; ignore.
 
     if isinstance(obj, tuple):
         if hasattr(obj, "_fields"):
@@ -331,6 +331,7 @@ def pformat(
 
 def pprint(obj: Any, **kwargs) -> None:
     """As `pformat`, but prints its result to stdout."""
+
     print(pformat(obj, **kwargs))
 
 

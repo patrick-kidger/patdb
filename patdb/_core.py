@@ -2485,7 +2485,17 @@ def debug(*args, stacklevel: int = 1):
     # frames in between.
     __tracebackhide__ = True
 
-    done_cell = _debug(*args, stacklevel=stacklevel)
+    # Ensure that we work in multithreaded contexts.
+    #
+    # Also disable breakpoints during initial set-up of `_debug`. We'll re-enable this
+    # when we enter the patdb REPL.
+    # This is to avoid infinite loops, in case we should happen to encounter a
+    # breakpoint during initial set-up.
+    #
+    # These are done as contexts here rather than decorators on `_debug`, so that the
+    # decorator-as-context-manager frame does not appear when (q)uitting out of pytest.
+    with _one_breakpoint_at_a_time(), _override_breakpointhook(lambda *a, **kw: None):
+        done_cell = _debug(*args, stacklevel=stacklevel)
     gc.collect()
     # We fill in `done_cell` only after the entirety of the `_debug` frame is gone and
     # the gc has been ran. This ensures that we will not trigger `_next_call_trace`
@@ -2511,13 +2521,6 @@ def _one_breakpoint_at_a_time():
         yield
 
 
-# Ensure that we work in multithreaded contexts.
-@_one_breakpoint_at_a_time()
-# Disable breakpoints during initial set-up of `_debug`. We'll re-enable this when we
-# enter the patdb REPL.
-# This is to avoid infinite loops, in case we should happen to encounter a breakpoint
-# during initial set-up.
-@_override_breakpointhook(lambda *a, **kw: None)
 def _debug(*args, stacklevel: int) -> list[bool]:
     # When using `pytest` -> `breakpoint()` -> `(q)uit`, it shows the visible stack
     # frames in between.
@@ -2577,6 +2580,7 @@ def _debug(*args, stacklevel: int) -> list[bool]:
             kinds=frozenset([_CallstackKind.toplevel]),
             collapse_default=False,
         )
+        find_visible = True
     else:
         if e is None:
             # Called as an explicit `breakpoint()`.
@@ -2584,14 +2588,16 @@ def _debug(*args, stacklevel: int) -> list[bool]:
             # override and (c) the nested `_debug` call.
             frames = tuple(
                 _Frame(x.frame, x.frame.f_lineno)
-                for x in inspect.stack()[3 + stacklevel :][::-1]
+                for x in inspect.stack()[1 + stacklevel :][::-1]
             )
+            find_visible = False
         elif isinstance(e, types.FrameType):
             frames = []
             while e is not None:
                 frames.append(_Frame(e, e.f_lineno))
                 e = e.f_back
             frames = tuple(reversed(frames))
+            find_visible = False
         elif isinstance(e, types.TracebackType):
             # Called as an explicit `patdb.debug(some_traceback)`.
             frames = []
@@ -2599,6 +2605,7 @@ def _debug(*args, stacklevel: int) -> list[bool]:
                 frames.append(_Frame(e.tb_frame, e.tb_lineno))
                 e = e.tb_next
             frames = tuple(frames)
+            find_visible = True
         else:
             raise TypeError(f"Cannot apply `patdb.debug` to object of type {type(e)}")
         root_callstack = _Callstack(
@@ -2668,18 +2675,20 @@ def _debug(*args, stacklevel: int) -> list[bool]:
         # I experimented with starting at the bottommost callstack instead, but the
         # difference didn't seem that important, and consistency with `pdb` here might
         # offer a better UX?
-        bottom_frame_idx = frame_idx = len(root_callstack.frames) - 1
-        while True:
-            if _is_frame_hidden(root_callstack.frames[frame_idx]):
-                if frame_idx == 0:
-                    # Could not find any unhidden frames. Default to the bottom one.
-                    frame_idx = bottom_frame_idx
-                    break
+        frame_idx = len(root_callstack.frames) - 1
+        if find_visible:
+            bottom_frame_idx = frame_idx
+            while True:
+                if _is_frame_hidden(root_callstack.frames[frame_idx]):
+                    if frame_idx == 0:
+                        # Could not find any unhidden frames. Default to the bottom one.
+                        frame_idx = bottom_frame_idx
+                        break
+                    else:
+                        frame_idx -= 1
                 else:
-                    frame_idx -= 1
-            else:
-                # Found our bottommost unhidden frame.
-                break
+                    # Found our bottommost unhidden frame.
+                    break
     state = _State(
         # Replaceable
         done=False,

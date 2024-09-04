@@ -1,8 +1,10 @@
 from ._definitions import (
     array_summary as array_summary,
     bracketed as bracketed,
+    comma as comma,
     join as join,
     named_objs as named_objs,
+    pdiff as pdiff,
     pdoc as pdoc,
     pformat as pformat,
     pprint as pprint,
