@@ -468,8 +468,59 @@ def _safe_run_in_thread(fn):
 #
 
 
-def _null_trace(_, __, ___):
-    pass
+def _is_frame_frozen(frame: types.FrameType) -> bool:
+    # Skip the noise from `runpy`, in particular as used in our `__main__.py`.
+    return frame.f_globals.get("__loader__", None) is importlib.machinery.FrozenImporter
+
+
+def is_frame_pytest(frame: types.FrameType) -> bool:
+    # Skip all of the noise in pytest when using the `--patdb` flag.
+    name = frame.f_globals.get("__name__", "")
+    for module in ("pytest", "_pytest", "pluggy"):
+        if name == module or name.startswith(f"{module}."):
+            return True
+    filename = frame.f_code.co_filename
+    if filename == "pytest" or filename.endswith("/pytest"):
+        return True
+    return False
+
+
+def _is_frame_hidden(frame: types.FrameType, prev_frame_hidden: bool) -> bool:
+    if frame.f_code.co_name in {"<genexpr>", "<listcomp>", "<setcomp>", "<dictcomp>"}:
+        # Note that we require an explicit `last_hidden` input, and do not check
+        # `_is_frame_hidden(frame.f_back)`, as the latter is not necessarily set when
+        # inside generators.
+        return prev_frame_hidden
+    else:
+        # https://stackoverflow.com/questions/61550012/why-doesnt-co-varnames-return-list-of-all-the-variable-names
+        local_varnames = {*frame.f_code.co_varnames, *frame.f_code.co_cellvars}
+        return (
+            # Do not access `frame.f_locals`! Avoids the following issue on Python
+            # <3.13:
+            # ```python
+            # import gc
+            # import weakref
+            #
+            # class Foo:
+            #     pass
+            #
+            # def f():
+            #     x = Foo()
+            #     y = weakref.ref(x)
+            #     locals()  # or access `sys._getframe().f_locals`
+            #     del x
+            #     gc.collect()
+            #     # Python >=3.13: dead reference
+            #     # Python <3.13: live reference
+            #     # See https://github.com/python/cpython/issues/50366 and PEP667.
+            #     print(y)
+            #
+            # f()
+            # ```
+            "__tracebackhide__" in local_varnames
+            or _is_frame_frozen(frame)
+            or is_frame_pytest(frame)
+        )
 
 
 # Pairing the frame object with the traceback `tb.tb_lineno`.
@@ -487,6 +538,7 @@ def _null_trace(_, __, ___):
 class _Frame:
     _frame: types.FrameType
     line: int
+    is_hidden: bool
 
     @property
     def f_code(self):
@@ -500,27 +552,50 @@ class _Frame:
     def f_globals(self):
         return self._frame.f_globals
 
-    @property
-    def local_varnames(self) -> set[str]:
-        # https://stackoverflow.com/questions/61550012/why-doesnt-co-varnames-return-list-of-all-the-variable-names
-        return set(self._frame.f_code.co_varnames + self._frame.f_code.co_cellvars)
-
     # Important that these caches be `cached_property` and not `functools.cache`, as the
     # latter holds on to strong references to the `self` objects.
 
     @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
     def function_source(self) -> Optional[list[str]]:
-        try:
-            lines, _ = inspect.getsourcelines(self._frame)
-        except OSError:
+        # This implementation is better than `inspect.getsourcelines`, in that we (a)
+        # use our improved `file_source` implementation below (which is more robust to
+        # bad `__pycache__`s than `inspect.getfile`) and (b) we produce the right
+        # results for generators, rather than just producing their containing function.
+        filename__source = self.file_source
+        if filename__source is None:
             return None
         else:
-            return [line.rstrip() for line in lines]
+            _, source = filename__source
+            # `max` just in case someone is doing evil things and passing nonpositive
+            # line numbers around. I can't imagine an example for that, but just in
+            # case?
+            # -1 because line numbers start form 1.
+            source = source[max(0, self.f_code.co_firstlineno - 1) :]
+            source = [line + "\n" for line in source]
+            source = inspect.getblock(source)
+            return [line.rstrip() for line in source]
 
     @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
     def file_source(self) -> Optional[tuple[str, list[str]]]:
         filename = self.f_code.co_filename
         filepath = pathlib.Path(filename).resolve()
+        if not filepath.exists():
+            # Could be that we hit an old `__pycache__` for some reason.
+            # I've seen `__pycache__` fail to be invalidated when moving a folder, for
+            # example. (Not sure why.)
+            # You could also maybe end up here if you're monkeying with import hooks.
+            # I'm not sure if this branch will be any more reliable under such
+            # circumstances, but it can't hurt.
+            module_name = self.f_globals.get("__name__", None)
+            if module_name is None:
+                return None
+            module = sys.modules.get(module_name, None)
+            if module is None:
+                return None
+            filepath = getattr(module, "__file__", None)
+            if filepath is None:
+                return None
+            filepath = pathlib.Path(filepath).resolve()
         if filepath.exists():
             source = filepath.read_text().rstrip()
             # Return the raw `filename`, not `filepath`. This is the 'pretty'
@@ -648,8 +723,10 @@ def _get_callstacks_from_error(
 ) -> _Callstack:
     tb = exception.__traceback__
     frames: list[_Frame] = []
+    frame_hidden = False
     while tb is not None:
-        frames.append(_Frame(tb.tb_frame, tb.tb_lineno))
+        frame_hidden = _is_frame_hidden(tb.tb_frame, frame_hidden)
+        frames.append(_Frame(tb.tb_frame, tb.tb_lineno, frame_hidden))
         tb = tb.tb_next
     callstack = _Callstack(
         _up_callstack=None if up_callstack is None else weakref.ref(up_callstack),
@@ -796,7 +873,7 @@ def _move_frame(
                 i_frames = list(reversed(i_frames[: location.frame_idx]))
         num_hidden = 0
         for frame_idx_out, frame in i_frames:
-            if skip_hidden and _is_frame_hidden(frame):
+            if skip_hidden and frame.is_hidden:
                 num_hidden += 1
             else:
                 return _MoveLocation(
@@ -855,52 +932,6 @@ class _State:
     root_callstack: _Callstack
     depth: Optional[int]
     modified_files: frozenset[pathlib.Path]
-
-
-def _is_frame_frozen(frame: _Frame) -> bool:
-    # Skip the noise from `runpy`, in particular as used in our `__main__.py`.
-    return frame.f_globals.get("__loader__", None) is importlib.machinery.FrozenImporter
-
-
-def is_frame_pytest(frame: _Frame) -> bool:
-    # Skip all of the noise in pytest when using the `--patdb` flag.
-    name = frame.f_globals.get("__name__", "")
-    for module in ("pytest", "_pytest", "pluggy"):
-        if name == module or name.startswith(f"{module}."):
-            return True
-    filename = frame.f_code.co_filename
-    if filename == "pytest" or filename.endswith("/pytest"):
-        return True
-    return False
-
-
-def _is_frame_hidden(frame: _Frame) -> bool:
-    return (
-        # Do not access `frame.f_locals`! Avoids the following issue on Python <3.13:
-        # ```python
-        # import gc
-        # import weakref
-        #
-        # class Foo:
-        #     pass
-        #
-        # def f():
-        #     x = Foo()
-        #     y = weakref.ref(x)
-        #     locals()  # or access `sys._getframe().f_locals`
-        #     del x
-        #     gc.collect()
-        #     # Python >=3.13: dead reference
-        #     # Python <3.13: live reference
-        #     # See https://github.com/python/cpython/issues/50366 and PEP667.
-        #     print(y)
-        #
-        # f()
-        # ```
-        "__tracebackhide__" in frame.local_varnames
-        or _is_frame_frozen(frame)
-        or is_frame_pytest(frame)
-    )
 
 
 #
@@ -1326,7 +1357,7 @@ def _format_callstack(
     else:
         is_hidden_callstack = True
     for j, frame in enumerate(callstack.frames):
-        is_hidden_frame = is_collapsed_callstack or _is_frame_hidden(frame)
+        is_hidden_frame = is_collapsed_callstack or frame.is_hidden
         if is_hidden_frame:
             num_hidden_frames += 1
         is_current_frame = is_current_callstack and j == current_frame_idx
@@ -1960,10 +1991,12 @@ def _show_function(state: _State) -> _State:
     frame = _current_frame(state.location)
     if isinstance(frame, str):
         _echo_first_line(frame)
+        _echo_newline_end_command()
     else:
         lines = frame.function_source
         if lines is None:
             _echo_first_line("<no source found>")
+            _echo_newline_end_command()
         else:
             # i.e. we're on the bottom frame
             jump_line_num, should_jump = _show_source(
@@ -1993,10 +2026,12 @@ def _show_file(state: _State) -> _State:
     frame = _current_frame(state.location)
     if isinstance(frame, str):
         _echo_first_line(frame)
+        _echo_newline_end_command()
     else:
         filepath__source = frame.file_source
         if filepath__source is None:
             _echo_first_line("<no source found>")
+            _echo_newline_end_command()
         else:
             filepath, source = filepath__source
             _echo_first_line(_bold(filepath))
@@ -2584,25 +2619,37 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     else:
         if e is None:
             # Called as an explicit `breakpoint()`.
-            # `3 + stacklevel` to escape (a) our threading lock and (b) our breakpoint
-            # override and (c) the nested `_debug` call.
-            frames = tuple(
-                _Frame(x.frame, x.frame.f_lineno)
-                for x in inspect.stack()[1 + stacklevel :][::-1]
+            frame_infos = tuple(
+                frame_info for frame_info in inspect.stack()[1 + stacklevel :][::-1]
             )
+            frame_hidden = False
+            frames = []
+            for frame_info in frame_infos:
+                frame_hidden = _is_frame_hidden(frame_info.frame, frame_hidden)
+                frames.append(
+                    _Frame(frame_info.frame, frame_info.frame.f_lineno, frame_hidden)
+                )
+            frames = tuple(frames)
             find_visible = False
         elif isinstance(e, types.FrameType):
-            frames = []
+            frame_infos = []
             while e is not None:
-                frames.append(_Frame(e, e.f_lineno))
+                frame_infos.append(e)
                 e = e.f_back
-            frames = tuple(reversed(frames))
+            frames = []
+            frame_hidden = False
+            for frame_info in reversed(frame_infos):
+                frame_hidden = _is_frame_hidden(frame_info.frame, frame_hidden)
+                frames.append(_Frame(frame_info, frame_info.f_lineno, frame_hidden))
+            frames = tuple(frames)
             find_visible = False
         elif isinstance(e, types.TracebackType):
             # Called as an explicit `patdb.debug(some_traceback)`.
             frames = []
+            frame_hidden = False
             while e is not None:
-                frames.append(_Frame(e.tb_frame, e.tb_lineno))
+                frame_hidden = _is_frame_hidden(e.tb_frame, frame_hidden)
+                frames.append(_Frame(e.tb_frame, e.tb_lineno, frame_hidden))
                 e = e.tb_next
             frames = tuple(frames)
             find_visible = True
@@ -2679,7 +2726,7 @@ def _debug(*args, stacklevel: int) -> list[bool]:
         if find_visible:
             bottom_frame_idx = frame_idx
             while True:
-                if _is_frame_hidden(root_callstack.frames[frame_idx]):
+                if root_callstack.frames[frame_idx].is_hidden:
                     if frame_idx == 0:
                         # Could not find any unhidden frames. Default to the bottom one.
                         frame_idx = bottom_frame_idx
@@ -2706,16 +2753,16 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     #
     # Step 5: print header information
     #
-    frame = _current_frame(state.location)
-    if isinstance(frame, str):
-        frame_info = frame
+    frame_info = _current_frame(state.location)
+    if isinstance(frame_info, str):
+        frame_info = frame_info
     else:
-        frame_info = _format_frame(frame)
+        frame_info = _format_frame(frame_info)
     click.echo(frame_info)
     if e is not None:
         click.echo("\n".join(_format_exception(e, short=False)))
-    if not isinstance(frame, str):
-        source_line = _show_line(frame)
+    if not isinstance(frame_info, str):
+        source_line = _show_line(frame_info)
         if source_line is not None:
             click.secho(source_line, reset=True)
     try:

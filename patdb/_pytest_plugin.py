@@ -1,6 +1,8 @@
 import argparse
 import inspect
 import sys
+import types
+from typing import Optional
 
 from ._core import debug, is_frame_pytest
 
@@ -12,7 +14,7 @@ class _PytestToPatdb:
     def reset(self):
         pass
 
-    def interaction(self, _, _tb):
+    def interaction(self, _, _tb: Optional[types.TracebackType]):
         # If you have an error during test collection, trigger this function, and then
         # `q`uit, then you actually trigger this function again internally to pytest!
         # That's clearly just a pytest bug, but we work around it here.
