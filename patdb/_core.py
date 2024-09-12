@@ -1000,6 +1000,16 @@ def _disable_logging():
 
 
 @contextlib.contextmanager
+def _disable_imports():
+    meta_path = sys.meta_path
+    sys.meta_path = []
+    try:
+        yield
+    finally:
+        sys.meta_path = meta_path
+
+
+@contextlib.contextmanager
 def _override_breakpointhook(hook):
     breakpointhook = sys.breakpointhook
     sys.breakpointhook = hook
@@ -1021,23 +1031,33 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
         document: prompt_toolkit.document.Document,
         complete_event: prompt_toolkit.completion.CompleteEvent,
     ) -> Iterable[prompt_toolkit.completion.Completion]:
-        with _disable_logging():
-            completions = iter(self.completer.get_completions(document, complete_event))
-        while True:
+        # ptpython uses a local import of jedi, so get that done now before we disable
+        # imports.
+
+        with (
+            # We don't ever want breakpoints to trigger when getting completions, so we
+            # disable it.
+            _override_breakpointhook(lambda *a, **k: None),
+            # Silence noisy debug logs from prompt_toolkit.
+            _disable_logging(),
+            # Prevent Jedi from dynamically performing imports. We're using a debugger
+            # here, so silently screwing with `sys.modules` is pretty confusing!
+            _disable_imports(),
+        ):
             try:
-                # We don't ever want breakpoints to trigger when getting completions, so
-                # we disable it.
-                with _override_breakpointhook(lambda *a, **k: None), _disable_logging():
-                    completion = next(completions)
-            except StopIteration:
-                break
+                # Don't get completions element-by-element but collect them into a list,
+                # so that we don't need to keep flip-flopping through our `with`
+                # statements above.
+                completions = list(
+                    self.completer.get_completions(document, complete_event)
+                )
             except Exception:
                 # Something went wrong. Probably we're in some kind of broken
                 # environment, for which Jedi cannot dynamically import in order to find
                 # its completions. In this case just give up.
-                break
-            else:
-                yield completion
+                return
+        # Unindented, to close out the `with` statement.
+        yield from completions
 
 
 class _PythonReplNoSave(ptpython.repl.PythonRepl):
