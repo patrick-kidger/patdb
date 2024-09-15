@@ -1033,6 +1033,11 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
     ) -> Iterable[prompt_toolkit.completion.Completion]:
         # ptpython uses a local import of jedi, so get that done now before we disable
         # imports.
+        import jedi
+        import jedi.inference.finder
+        import jedi.inference.star_args
+
+        del jedi
 
         with (
             # We don't ever want breakpoints to trigger when getting completions, so we
@@ -1045,17 +1050,24 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
             _disable_imports(),
         ):
             try:
-                # Don't get completions element-by-element but collect them into a list,
-                # so that we don't need to keep flip-flopping through our `with`
-                # statements above.
-                completions = list(
+                get_completions = iter(
                     self.completer.get_completions(document, complete_event)
                 )
             except Exception:
+                return
+            completions = []
+            try:
+                # Don't get completions element-by-element but collect them into a list,
+                # so that we don't need to keep flip-flopping through our `with`
+                # statements above.
+                completions.append(next(get_completions))
+            except StopIteration:
+                return
+            except Exception:
                 # Something went wrong. Probably we're in some kind of broken
                 # environment, for which Jedi cannot dynamically import in order to find
-                # its completions. In this case just give up.
-                return
+                # its completions.
+                pass
         # Unindented, to close out the `with` statement.
         yield from completions
 
