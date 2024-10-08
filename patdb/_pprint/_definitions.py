@@ -25,18 +25,17 @@ class _WithRepr:
         return self.string
 
 
-comma = ConcatDoc(TextDoc(","), BreakDoc(" "))
+comma = ConcatDoc((TextDoc(","), BreakDoc(" ")))
 
 
-def join(sep: AbstractDoc, objs: Sequence[AbstractDoc]):
+def join(sep: AbstractDoc, objs: Sequence[AbstractDoc]) -> AbstractDoc:
     if len(objs) == 0:
-        return ConcatDoc()
-    else:
-        pieces = [objs[0]]
-        for obj in objs[1:]:
-            pieces.append(sep)
-            pieces.append(obj)
-        return ConcatDoc(*pieces)
+        return ConcatDoc(())
+    pieces = [objs[0]]
+    for obj in objs[1:]:
+        pieces.append(sep)
+        pieces.append(obj)
+    return ConcatDoc(tuple(pieces))
 
 
 def bracketed(
@@ -45,21 +44,25 @@ def bracketed(
     objs: Sequence[AbstractDoc],
     lbracket: str,
     rbracket: str,
+    sep: AbstractDoc = comma,
 ) -> AbstractDoc:
     objs = [GroupDoc(x) for x in objs]
-    nested = ConcatDoc(
-        NestDoc(ConcatDoc(BreakDoc(""), join(comma, objs)), indent), BreakDoc("")
-    )
+    if len(objs) == 0:
+        nested = ConcatDoc(())  # In particular no BreakDocs.
+    else:
+        nested = ConcatDoc(
+            (NestDoc(ConcatDoc((BreakDoc(""), join(sep, objs))), indent), BreakDoc(""))
+        )
     pieces = []
     if name is not None:
         pieces.append(name)
     pieces.extend([TextDoc(lbracket), nested, TextDoc(rbracket)])
-    return GroupDoc(ConcatDoc(*pieces))
+    return GroupDoc(ConcatDoc(tuple(pieces)))
 
 
 def named_objs(pairs: Iterable[tuple[Any, Any]], **kwargs):
     return [
-        ConcatDoc(TextDoc(key), TextDoc("="), pdoc(value, **kwargs))
+        ConcatDoc((TextDoc(key), TextDoc("="), pdoc(value, **kwargs)))
         for key, value in pairs
     ]
 
@@ -88,9 +91,29 @@ def _pformat_list(obj: list, **kwargs) -> AbstractDoc:
     )
 
 
+def _pformat_set(obj: set, **kwargs) -> AbstractDoc:
+    return bracketed(
+        name=None,
+        indent=kwargs["indent"],
+        objs=[pdoc(x, **kwargs) for x in obj],
+        lbracket="{",
+        rbracket="}",
+    )
+
+
+def _pformat_frozenset(obj: frozenset, **kwargs) -> AbstractDoc:
+    return bracketed(
+        name=TextDoc("frozenset"),
+        indent=kwargs["indent"],
+        objs=[pdoc(x, **kwargs) for x in obj],
+        lbracket="({",
+        rbracket="})",
+    )
+
+
 def _pformat_tuple(obj: tuple, **kwargs) -> AbstractDoc:
     if len(obj) == 1:
-        objs = [ConcatDoc(pdoc(obj[0], **kwargs), TextDoc(","))]
+        objs = [ConcatDoc((pdoc(obj[0], **kwargs), TextDoc(",")))]
     else:
         objs = [pdoc(x, **kwargs) for x in obj]
     return bracketed(
@@ -111,7 +134,7 @@ def _pformat_namedtuple(obj: NamedTuple, **kwargs) -> AbstractDoc:
 
 def _dict_entry(key: Any, value: Any, **kwargs) -> AbstractDoc:
     return ConcatDoc(
-        pdoc(key, **kwargs), TextDoc(":"), BreakDoc(" "), pdoc(value, **kwargs)
+        (pdoc(key, **kwargs), TextDoc(":"), BreakDoc(" "), pdoc(value, **kwargs))
     )
 
 
@@ -142,8 +165,7 @@ def _pformat_ndarray(obj, **kwargs) -> AbstractDoc:
         assert kind is not None
         *_, dtype = str(obj.dtype).rsplit(".")
         return array_summary(obj.shape, dtype, kind)
-    else:
-        return TextDoc(repr(obj))
+    return TextDoc(repr(obj))
 
 
 def _pformat_partial(obj: ft.partial, **kwargs) -> AbstractDoc:
@@ -162,7 +184,8 @@ def _pformat_partial(obj: ft.partial, **kwargs) -> AbstractDoc:
 
 
 def _pformat_function(obj: types.FunctionType, **kwargs) -> AbstractDoc:
-    if kwargs.get("wrapped", False):
+    del kwargs
+    if hasattr(obj, "__wrapped__"):
         fn = "wrapped function"
     else:
         fn = "function"
@@ -190,7 +213,6 @@ def _pformat_dataclass(obj, **kwargs) -> AbstractDoc:
 def pdoc(
     obj: Any,
     indent: int = 2,
-    follow_wrapped: bool = True,
     short_arrays: bool = True,
     custom: Callable[[Any], None | AbstractDoc] = lambda _: None,
     **kwargs,
@@ -203,7 +225,6 @@ def pdoc(
     - `obj`: the object to pretty-doc.
     - `indent`: when the contents of a structured type are too large to fit on one line,
         they will be indented by this amount and placed on separate lines.
-    - `follow_wrapped`: whether to unwrap `__wrapped__` and `functools.partial` objects.
     - `short_arrays`: whether to print a NumPy array / PyTorch tensor / JAX array as a
         short summary of the form `f32[3,4]` (here indicating a `float32` matrix of
         shape `(3, 4)`)
@@ -231,7 +252,6 @@ def pdoc(
     """
 
     kwargs["indent"] = indent
-    kwargs["follow_wrapped"] = follow_wrapped
     kwargs["short_arrays"] = short_arrays
     kwargs["custom"] = custom
 
@@ -251,25 +271,25 @@ def pdoc(
     if isinstance(obj, tuple):
         if hasattr(obj, "_fields"):
             return _pformat_namedtuple(cast(NamedTuple, obj), **kwargs)
-        else:
-            return _pformat_tuple(obj, **kwargs)
-    elif isinstance(obj, list):
+        return _pformat_tuple(obj, **kwargs)
+    if isinstance(obj, list):
         return _pformat_list(obj, **kwargs)
-    elif isinstance(obj, dict):
+    if isinstance(obj, dict):
         return _pformat_dict(obj, **kwargs)
-    elif _array_kind(obj) is not None:
+    if isinstance(obj, set):
+        return _pformat_set(obj, **kwargs)
+    if isinstance(obj, frozenset):
+        return _pformat_frozenset(obj, **kwargs)
+    if _array_kind(obj) is not None:
         return _pformat_ndarray(obj, **kwargs)
-    elif follow_wrapped and hasattr(obj, "__wrapped__"):
-        kwargs["wrapped"] = True
-        return pdoc(obj.__wrapped__, **kwargs)
-    elif isinstance(obj, ft.partial):
+    if isinstance(obj, ft.partial):
         return _pformat_partial(obj, **kwargs)
-    elif isinstance(obj, types.FunctionType):
+    if isinstance(obj, types.FunctionType):
         return _pformat_function(obj, **kwargs)
-    elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return _pformat_dataclass(obj, **kwargs)
-    else:  # str, bool, int, float, complex etc.
-        return TextDoc(repr(obj))
+    # str, bool, int, float, complex etc.
+    return TextDoc(repr(obj))
 
 
 def pformat(
@@ -282,7 +302,7 @@ def pformat(
     custom: Callable[[Any], None | AbstractDoc] = lambda _: None,
     **kwargs,
 ) -> str:
-    """Pretty-formats an object into a string.
+    """Pretty-formats an object as a string.
 
     **Arguments:**
 
@@ -336,7 +356,30 @@ def pprint(obj: Any, **kwargs) -> None:
 
 
 def pdiff(p_minus: str, p_plus: str) -> str:
-    """Prints a pretty-diff between two objects."""
+    """Returns a pretty-diff between two strings.
+
+    You may want to use `pformat` to produce those strings.
+    """
     diff = difflib.ndiff(p_minus.splitlines(), p_plus.splitlines())
     diff = "\n".join(line for line in diff if not line.startswith("?"))
     return diff
+
+
+def ansi_format(text: str, color: str, bold: bool) -> str:
+    """Formats `text` with a foreground color `color`, and optionally mark it `bold`,
+    using ANSI color codes.
+    """
+    color_code = {
+        "black": "\x1b[30m",
+        "red": "\x1b[31m",
+        "green": "\x1b[32m",
+        "yellow": "\x1b[33m",
+        "blue": "\x1b[34m",
+        "magenta": "\x1b[35m",
+        "cyan": "\x1b[36m",
+        "white": "\x1b[37m",
+    }[color]
+    out = color_code + text + "\x1b[0m"
+    if bold:
+        out = "\x1b[1m" + out
+    return out

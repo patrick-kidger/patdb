@@ -15,6 +15,7 @@ References:
 Inspired by JAX's use of the same references above, but re-implemented from scratch.
 """
 
+import re
 from dataclasses import dataclass
 
 
@@ -31,9 +32,6 @@ class TextDoc(AbstractDoc):
 class ConcatDoc(AbstractDoc):
     children: tuple[AbstractDoc, ...]
 
-    def __init__(self, *children: AbstractDoc):
-        object.__setattr__(self, "children", children)
-
 
 @dataclass(frozen=True)
 class NestDoc(AbstractDoc):
@@ -45,10 +43,18 @@ class NestDoc(AbstractDoc):
 class BreakDoc(AbstractDoc):
     text: str
 
+    def __post_init__(self):
+        if "\n" in self.text:
+            raise ValueError("Cannot have newlines in BreakDocs.")
+
 
 @dataclass(frozen=True)
 class GroupDoc(AbstractDoc):
     child: AbstractDoc
+
+
+def _remove_ansi(x: str) -> str:
+    return re.sub(r"\033\[[;?0-9]*[a-zA-Z]", "", x)
 
 
 # The implementation in both Lindig and JAX additionally tracks an indent and a mode...
@@ -58,13 +64,15 @@ def _fits(doc: AbstractDoc, width: int) -> bool:
     while len(todo) > 0 and width >= 0:
         match todo.pop():
             case TextDoc(text):
-                width -= max(len(line) for line in text.splitlines())
+                width -= max(
+                    (len(line) for line in _remove_ansi(text).splitlines()), default=0
+                )
             case ConcatDoc(children):
                 todo.extend(reversed(children))
             case NestDoc(child, _):
                 todo.append(child)
             case BreakDoc(text):
-                width -= len(text)
+                width -= len(_remove_ansi(text))
             case GroupDoc(child):
                 todo.append(child)
             case _:
@@ -73,7 +81,7 @@ def _fits(doc: AbstractDoc, width: int) -> bool:
 
 
 def pretty_format(doc: AbstractDoc, width: int) -> str:
-    """Pretty-formats some text using a Wadler--Lindig pretty-printer.
+    """Pretty-formats a document using a Wadler--Lindig pretty-printer.
 
     **Arguments:**
 
@@ -84,6 +92,12 @@ def pretty_format(doc: AbstractDoc, width: int) -> str:
     **Returns:**
 
     A string, corresponding to the pretty-printed document.
+
+    !!! info
+
+        We extend the canonical Wadler--Lindig implementation with the ability to handle
+        multiline text. We also remove what seems to be some dead code from their
+        implementation.
     """
     outs: list[str] = []
     width_so_far = 0
@@ -94,7 +108,7 @@ def pretty_format(doc: AbstractDoc, width: int) -> str:
         match todo.pop():
             case indent, _, TextDoc(text):
                 outs.append(text.replace("\n", "\n" + " " * width_so_far))
-                width_so_far += max(len(line) for line in text.splitlines())
+                width_so_far += len(_remove_ansi(text.rsplit("\n", 1)[-1]))
             case indent, flat, ConcatDoc(children):
                 todo.extend((indent, flat, child) for child in reversed(children))
             case indent, flat, NestDoc(child, new_indent):
@@ -102,7 +116,7 @@ def pretty_format(doc: AbstractDoc, width: int) -> str:
             case indent, flat, BreakDoc(text):
                 if flat:
                     outs.append(text)
-                    width_so_far += len(text)
+                    width_so_far += len(_remove_ansi(text))
                 else:
                     outs.append("\n" + " " * indent)
                     width_so_far = indent

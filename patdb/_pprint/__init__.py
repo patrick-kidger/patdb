@@ -1,4 +1,5 @@
 from ._definitions import (
+    ansi_format as ansi_format,
     array_summary as array_summary,
     bracketed as bracketed,
     comma as comma,
@@ -14,5 +15,6 @@ from ._wadler_lindig import (
     BreakDoc as BreakDoc,
     ConcatDoc as ConcatDoc,
     GroupDoc as GroupDoc,
+    NestDoc as NestDoc,
     TextDoc as TextDoc,
 )
