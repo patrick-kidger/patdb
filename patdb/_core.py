@@ -1050,24 +1050,25 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
             _disable_imports(),
         ):
             try:
-                get_completions = iter(
+                iter_completions = iter(
                     self.completer.get_completions(document, complete_event)
                 )
             except Exception:
                 return
+            # Don't get completions element-by-element but collect them into a list,
+            # so that we don't need to keep flip-flopping through our `with`
+            # statements above.
             completions = []
-            try:
-                # Don't get completions element-by-element but collect them into a list,
-                # so that we don't need to keep flip-flopping through our `with`
-                # statements above.
-                completions.append(next(get_completions))
-            except StopIteration:
-                return
-            except Exception:
-                # Something went wrong. Probably we're in some kind of broken
-                # environment, for which Jedi cannot dynamically import in order to find
-                # its completions.
-                pass
+            while True:
+                try:
+                    completions.append(next(iter_completions))
+                except StopIteration:
+                    break
+                except Exception:
+                    # Something went wrong. Probably we're in some kind of broken
+                    # environment, for which Jedi cannot dynamically import in order to
+                    # find its completions.
+                    pass
         # Unindented, to close out the `with` statement.
         yield from completions
 
