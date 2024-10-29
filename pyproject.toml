@@ -16,7 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 urls = {repository = "https://github.com/patrick-kidger/patdb" }
-dependencies = ["click>=8.1.7", "prompt_toolkit>=3.0.46", "ptpython>=3.0.27", "pygments>=2.18.0", "typing_extensions>=4.5.0"]
+dependencies = ["click>=8.1.7", "prompt_toolkit>=3.0.46", "ptpython>=3.0.27", "pygments>=2.14.0", "typing_extensions>=4.5.0"]
 entry-points = {pytest11 = {patdb = "patdb._pytest_plugin"}}
 
 [build-system]
