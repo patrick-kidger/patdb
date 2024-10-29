@@ -1348,9 +1348,15 @@ def _format_frame(frame: _Frame, prefix: Optional[str] = None) -> str:
         name = frame.f_code.co_name
     current_line = str(frame.line)
     function_line = str(frame.f_code.co_firstlineno)
+    if frame.is_hidden:
+        lbr = "("
+        rbr = ")"
+    else:
+        lbr = " "
+        rbr = " "
     return (
-        f"File {_emph(file)}, at {_emph(name)} from {_emph(function_line)}, "
-        f"line {_emph(current_line)}"
+        f"{lbr}File {_emph(file)}, at {_emph(name)} from {_emph(function_line)}, "
+        f"line {_emph(current_line)}{rbr}"
     )
 
 
@@ -1384,28 +1390,32 @@ def _format_callstack(
         is_interactive_callstack = interactive_location.callstack is callstack
         current_frame_idx = current_location.frame_idx
         interactive_frame_idx = interactive_location.frame_idx
-    is_collapsed_callstack = is_collapsed(callstack)
-    if len(callstack.frames) == 0:
-        is_hidden_callstack = False
-    else:
+    if is_collapsed(callstack):
         is_hidden_callstack = True
-    for j, frame in enumerate(callstack.frames):
-        is_hidden_frame = is_collapsed_callstack or frame.is_hidden
-        if is_hidden_frame:
-            num_hidden_frames += 1
-        is_current_frame = is_current_callstack and j == current_frame_idx
-        is_interactive_frame = is_interactive_callstack and j == interactive_frame_idx
-        if (
-            is_current_frame
-            or is_interactive_frame
-            or not (skip_hidden and is_hidden_frame)
-        ):
-            if frame.f_code.co_filename.startswith("/"):
-                foldernames.append(frame.f_code.co_filename)
-            frame_lines.append(
-                (frame, is_current_frame, is_interactive_frame, is_hidden_frame)
-            )
+    else:
+        if len(callstack.frames) == 0:
             is_hidden_callstack = False
+        else:
+            is_hidden_callstack = True
+        for j, frame in enumerate(callstack.frames):
+            is_hidden_frame = frame.is_hidden
+            if is_hidden_frame:
+                num_hidden_frames += 1
+            is_current_frame = is_current_callstack and j == current_frame_idx
+            is_interactive_frame = (
+                is_interactive_callstack and j == interactive_frame_idx
+            )
+            if (
+                is_current_frame
+                or is_interactive_frame
+                or not (skip_hidden and is_hidden_frame)
+            ):
+                if frame.f_code.co_filename.startswith("/"):
+                    foldernames.append(frame.f_code.co_filename)
+                frame_lines.append(
+                    (frame, is_current_frame, is_interactive_frame, is_hidden_frame)
+                )
+                is_hidden_callstack = False
 
     if len(foldernames) == 0:
         prefix = ""
@@ -1463,13 +1473,7 @@ def _format_callstack(
                 current=is_current_frame, interactive=is_interactive_frame
             )
             frame_str = _format_frame(frame, prefix)
-            if is_hidden_frame:
-                hidden_left = "("
-                hidden_right = ")"
-            else:
-                hidden_left = " "
-                hidden_right = " "
-            stack_line = f"{frame_arrow}{indent}{hidden_left}{frame_str}{hidden_right}"
+            stack_line = f"{frame_arrow}{indent}{frame_str}"
             if is_interactive_frame or is_current_frame:
                 stack_line = _bold(stack_line)
             yield stack_line, is_interactive_frame
