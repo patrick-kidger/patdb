@@ -584,6 +584,9 @@ class _Frame:
             # I've seen `__pycache__` fail to be invalidated when moving a folder, for
             # example. (Not sure why.)
             # You could also maybe end up here if you're monkeying with import hooks.
+            # Another example in which you get here is when downloading an error from a
+            # remote execution, and debugging it locally.
+            #
             # I'm not sure if this branch will be any more reliable under such
             # circumstances, but it can't hurt.
             module_name = self.f_globals.get("__name__", None)
