@@ -15,6 +15,7 @@ class _PytestToPatdb:
         pass
 
     def interaction(self, _, _tb: Optional[types.TracebackType]):
+        is_stop_iteration = False
         # If you have an error during test collection, trigger this function, and then
         # `q`uit, then you actually trigger this function again internally to pytest!
         # That's clearly just a pytest bug, but we work around it here.
@@ -23,6 +24,18 @@ class _PytestToPatdb:
         while _tb is not None:
             if not is_frame_pytest(_tb.tb_frame):
                 break
+            if _tb.tb_next is None and (
+                exception := _tb.tb_frame.f_locals.get("exception", None)
+            ):
+                if (
+                    type(exception) is RuntimeError
+                    and str(exception) == "generator raised StopIteration"
+                ):
+                    # We do need to carve out an edge case to this edge case: when the
+                    # test raises a `StopIteration` specifically then we seem to end up
+                    # here as well...
+                    is_stop_iteration = True
+                    break
             _tb = _tb.tb_next
         else:
             return  # Internal pytest error during quitting.
@@ -49,6 +62,8 @@ class _PytestToPatdb:
                 e = frame.frame.f_locals["excinfo"].value
             except Exception:
                 return
+        if is_stop_iteration:  # More working around pytest bugs.
+            e = e.__context__
         try:
             debug(e)
         except SystemExit:
