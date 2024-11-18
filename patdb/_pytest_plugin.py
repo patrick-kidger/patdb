@@ -4,7 +4,7 @@ import sys
 import types
 from typing import Optional
 
-from ._core import debug, is_frame_pytest
+from . import _core
 
 
 class _PytestToPatdb:
@@ -22,7 +22,7 @@ class _PytestToPatdb:
         # (Notably `--pdb` also triggers again -- without working around it -- so
         # nothing unique to us.)
         while _tb is not None:
-            if not is_frame_pytest(_tb.tb_frame):
+            if not _core.is_frame_pytest(_tb.tb_frame):
                 break
             if _tb.tb_next is None and (
                 exception := _tb.tb_frame.f_locals.get("exception", None)
@@ -65,14 +65,14 @@ class _PytestToPatdb:
         if is_stop_iteration:  # More working around pytest bugs.
             e = e.__context__
         try:
-            debug(e)
+            _core.debug(e)
         except SystemExit:
             self.quitting = True
 
     def set_trace(self, frame):
         del frame
         # Skip `debug`, `set_trace`, and `_pytest.debugging.pytestPDB.set_trace`.
-        debug(stacklevel=3)
+        _core.debug(stacklevel=3)
 
 
 class _Action(argparse.Action):
@@ -90,3 +90,7 @@ def pytest_addoption(parser):
         nargs=0,
         help="Open a `patdb` debugger on error.",
     )
+
+
+def pytest_configure(config):
+    _core._pytest_pluginmanager = config.pluginmanager

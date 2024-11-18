@@ -2569,8 +2569,9 @@ def debug(*args, stacklevel: int = 1):
     #
     # These are done as contexts here rather than decorators on `_debug`, so that the
     # decorator-as-context-manager frame does not appear when (q)uitting out of pytest.
-    with _one_breakpoint_at_a_time(), _override_breakpointhook(lambda *a, **kw: None):
-        done_cell = _debug(*args, stacklevel=stacklevel)
+    with _one_breakpoint_at_a_time():
+        with _override_breakpointhook(lambda *a, **kw: None), _disable_pytest_capture():
+            done_cell = _debug(*args, stacklevel=stacklevel)
     gc.collect()
     # We fill in `done_cell` only after the entirety of the `_debug` frame is gone and
     # the gc has been ran. This ensures that we will not trigger `_next_call_trace`
@@ -2593,6 +2594,27 @@ def _one_breakpoint_at_a_time():
         except KeyError:
             lock = _locks[_config.depth] = threading.Lock()
     with lock:
+        yield
+
+
+_pytest_pluginmanager = None
+
+
+# This (a) gives compatibility with the `capfd` fixture, and (b) avoids the need to pass
+# the `-s` flag to pytest.
+@contextlib.contextmanager
+def _disable_pytest_capture():
+    if _pytest_pluginmanager is not None:
+        capman = _pytest_pluginmanager.getplugin("capturemanager")
+        if capman:
+            capman.suspend(in_=True)
+            try:
+                yield
+            finally:
+                capman.resume()
+        else:
+            yield
+    else:
         yield
 
 
