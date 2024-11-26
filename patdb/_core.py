@@ -270,20 +270,12 @@ class _Config:
 
     # Uncached, it may change as we nest.
     @property
-    def depth(self) -> Optional[int]:
-        out = os.getenv("PATDB_DEPTH", None)
-        if out is None:
-            return None
-        else:
-            return int(out)
+    def depth(self) -> int:
+        return int(os.getenv("PATDB_DEPTH", 0))
 
     @depth.setter
     def depth(self, value: int):
         os.environ["PATDB_DEPTH"] = str(value)
-
-    @depth.deleter
-    def depth(self):
-        del os.environ["PATDB_DEPTH"]
 
     @ft.cached_property
     def line_editor(self) -> Optional[str]:
@@ -935,7 +927,7 @@ class _State:
     print_history: prompt_toolkit.history.InMemoryHistory
     helpmsg: Callable[[], str]
     root_callstack: _Callstack
-    depth: Optional[int]
+    depth: int
     modified_files: frozenset[pathlib.Path]
 
 
@@ -1153,7 +1145,7 @@ def _basic_app(
         Union[Callable[[_Carry], tuple[_Carry, bool]], Literal["left", "right"]],
         tuple[str, Optional[str]],
     ],
-    depth: Optional[int],
+    depth: int,
 ) -> _Carry:
     carry = initial_carry
     hscroll = 0
@@ -1231,22 +1223,22 @@ def _basic_app(
 
 # Note that we must not cache the result of this function, as else nested `patdb`
 # instances will not pick up on the correct depth.
-def _patdb_prompt(depth: Optional[int]) -> str:
+def _patdb_prompt(depth: int) -> str:
     """The REPL command prompt."""
-    if depth is None:
+    if depth == 0:
         prompt = "patdb> "
     else:
         prompt = f"patdb{depth}> "
     return click.style(prompt, fg=_config.prompt_colour)
 
 
-def _patdb_info(x: Union[str, list[str]], depth: Optional[int]):
+def _patdb_info(x: Union[str, list[str]], depth: int):
     """Used to display information about `patdb` itself, e.g. command hints.
 
     Should NOT be used to display information about the current session state, e.g.
     stack locations.
     """
-    if depth is None:
+    if depth == 0:
         prompt = "patdb: "
     else:
         prompt = f"patdb{depth}: "
@@ -1258,7 +1250,7 @@ def _patdb_info(x: Union[str, list[str]], depth: Optional[int]):
     return click.style("".join(xs), fg=_config.info_colour)
 
 
-def _make_key_bindings(key_mapping: dict[Callable, str], depth: Optional[int]):
+def _make_key_bindings(key_mapping: dict[Callable, str], depth: int):
     errors = []
     key_bindings = prompt_toolkit.key_binding.KeyBindings()
     fn_keys = {}
@@ -1635,7 +1627,7 @@ def _format_source(
 
 
 def _show_source(
-    source: list[str], first_line_num: int, current_line_num: int, depth: Optional[int]
+    source: list[str], first_line_num: int, current_line_num: int, depth: int
 ) -> tuple[Optional[int], bool]:
     joined_source = "\n".join(source)
     last_line_num = first_line_num + len(source) - 1
@@ -1871,7 +1863,7 @@ def _subprocess_edit(
     root_callstack: _Callstack,
     filepath: pathlib.Path,
     editor: str,
-    depth: Optional[int],
+    depth: int,
     is_modified: bool,
 ) -> tuple[int, bool]:
     # Cache the source for all frames using this file, before we potentially modify the
@@ -1937,18 +1929,12 @@ class MultiprocessingSystemExit(Exception):
 
 
 @contextlib.contextmanager
-def _depth_context(depth: Optional[int]):
-    if depth is None:
-        _config.depth = 1
-    else:
-        _config.depth = depth + 1
+def _depth_context(depth: int):
+    _config.depth = depth + 1
     try:
         yield
     finally:
-        if depth is None:
-            del _config.depth
-        else:
-            _config.depth = depth
+        _config.depth = depth
 
 
 #
@@ -2650,9 +2636,7 @@ def _one_breakpoint_at_a_time():
         try:
             lock = _locks[_config.depth]
         except KeyError:
-            lock = _locks[_config.depth] = _Lock(
-                0 if _config.depth is None else _config.depth
-            )
+            lock = _locks[_config.depth] = _Lock(_config.depth)
     with lock:
         yield
 
