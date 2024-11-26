@@ -6,7 +6,7 @@
 - Walk through the whole stack interactively.
 - A snappy single-keystroke interface.
 - Respects `__tracebackhide__` hidden frames.
-- Usable inside `threading` and `asyncio`.
+- Usable inside `threading`, `asyncio`, and even `multiprocessing`.
 
 <br>
 <div align="center">

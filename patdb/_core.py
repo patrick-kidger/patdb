@@ -9,6 +9,7 @@ import gc
 import importlib.machinery
 import inspect
 import logging
+import multiprocessing
 import operator
 import os
 import pathlib
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 import traceback
 import types
 import weakref
@@ -1930,6 +1932,10 @@ def _make_help(fn_keys):
     return helpmsg
 
 
+class MultiprocessingSystemExit(Exception):
+    pass
+
+
 @contextlib.contextmanager
 def _depth_context(depth: Optional[int]):
     if depth is None:
@@ -2471,7 +2477,13 @@ def _quit(state: _State) -> NoReturn:
 
     _echo_first_line("Quitting.")
     _echo_newline_end_command()
-    sys.exit()
+    if multiprocessing.parent_process() is None:
+        sys.exit()
+    else:
+        # For some reason multiprocessing only handles Exceptions, but not
+        # BaseExceptions, gracefully. If we just raise a `SystemExit` (from `sys.exit`)
+        # then multiprocessing in the parent process will just hang.
+        raise MultiprocessingSystemExit
 
 
 def _help(state: _State) -> _State:
@@ -2579,7 +2591,53 @@ def debug(*args, stacklevel: int = 1):
     done_cell[0] = True
 
 
-_metalock = threading.Lock()
+if sys.platform == "darwin" or sys.platform.startswith("linux"):
+    # I had a long painful time trying to get locking working with multiprocessing, and
+    # did not succeed. At least on MacOS then it seems like `multiprocessing.Lock` only
+    # works if either (a) you use the `fork` method, or (b) you pass the lock to the
+    # process as an argument. (Noting that the default method on MacOS is `spawn`, which
+    # only copies across what is needed for the subprocess.)
+    #
+    # As such getting this working seems quite difficult! Especially as `patdb` probably
+    # isn't even imported into the parent process, but will be dynamically imported into
+    # the child process once a breakpoint is hit.
+    #
+    # So... we're using the filesystem instead. Not a great solution but it does work.
+    # In non-multiprocessing contexts the overhead should be negligible, just the cost
+    # of creating/destroying the file.
+    #
+    # We gate this whole block on being on Unix, so that `os.getpgrp()` will work. I
+    # don't currently have a Windows/etc. machine to check other systems for what their
+    # equivalents should be.
+    class _Lock:
+        def __init__(self, name: Any):
+            # Include a normal threading lock so that multiple threads can lock without
+            # CPU overhead (as the filesystem component of the locking uses a busy loop
+            # below, not cheap!)
+            self.lock = threading.Lock()
+            self.filepath = (
+                pathlib.Path.home() / ".cache" / "patdb" / f"lock-{name}-{os.getpgrp()}"
+            )
+
+        def __enter__(self):
+            self.lock.__enter__()
+            while True:
+                while self.filepath.exists():
+                    time.sleep(0.1)
+                try:
+                    self.filepath.touch(exist_ok=False)
+                except FileExistsError:
+                    continue  # race condition between `filepath.exists()` and now.
+                break  # lock acquired
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.filepath.unlink()
+            return self.lock.__exit__(exc_type, exc_val, exc_tb)
+else:
+    _Lock = lambda name: threading.Lock()
+
+
+_metalock = _Lock(name="meta")
 _locks = {}
 
 
@@ -2592,7 +2650,9 @@ def _one_breakpoint_at_a_time():
         try:
             lock = _locks[_config.depth]
         except KeyError:
-            lock = _locks[_config.depth] = threading.Lock()
+            lock = _locks[_config.depth] = _Lock(
+                0 if _config.depth is None else _config.depth
+            )
     with lock:
         yield
 
@@ -2616,6 +2676,32 @@ def _disable_pytest_capture():
             yield
     else:
         yield
+
+
+@contextlib.contextmanager
+def _multiprocessing_stdin():
+    try:
+        stdin_fileno = sys.stdin.fileno()
+    except Exception:
+        # Not all file-likes have a fileno, e.g.
+        # https://stackoverflow.com/questions/44123116/in-python-error-on-sys-stdin-fileno
+        yield
+    else:
+        if (
+            not os.isatty(stdin_fileno)
+            and os.isatty(0)
+            and multiprocessing.parent_process() is not None
+        ):
+            # We're in a subprocess created by `multiprocessing`. By default we don't
+            # get a stdin. Time to steal it from our parent process!
+            old_stdin_fileno = os.dup(stdin_fileno)
+            os.dup2(0, stdin_fileno)
+            try:
+                yield
+            finally:
+                os.dup2(old_stdin_fileno, stdin_fileno)
+        else:
+            yield
 
 
 def _debug(*args, stacklevel: int) -> list[bool]:
@@ -2845,13 +2931,19 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     # Step 6: run the REPL!
     #
 
+    prompt = _patdb_prompt(state.depth)
+
     # `prompt_toolkit` has its own hook that it will set sometimes.
     # In some multithreaded programs it seems that it is possible (somehow?) for that
     # hook to be the current one whilst another thread triggers the breakpoint.
     #
     # We only set this here in case we enter a `breakpoint()` during the initial set-up
     # of this function.
-    with _override_breakpointhook(debug):
+    with (
+        _override_breakpointhook(debug),
+        _depth_context(state.depth),
+        _multiprocessing_stdin(),
+    ):
         container = prompt_toolkit.layout.containers.Window(
             content=prompt_toolkit.layout.controls.DummyControl()
         )
@@ -2866,43 +2958,41 @@ def _debug(*args, stacklevel: int) -> list[bool]:
             include_default_pygments_style=False,
             output=output,
         )
-        prompt = _patdb_prompt(state.depth)
 
-        with _depth_context(state.depth):
-            while not state.done:
-                click.echo(prompt, nl=False)
-                try:
-                    _safe_run_in_thread(app.run)
-                except EOFError as e:
-                    raise RuntimeError(
-                        "Could not start the debugger, probably because it could not "
-                        "connect to `sys.{stdin,stdout}`.\n"
-                        "If you are using `breakpoint()` or `patdb.debug()` from "
-                        "within `pytest`, then this can be fixed by adding the `-s` "
-                        "flag.\n"
-                        "If you are using `patdb` from within an environment like "
-                        "Jupyter or Marimo, then unfortunately these are not "
-                        "compatible with `patdb`, as these environments do not support "
-                        "terminal emulation capabilities."
-                    ) from e
-                assert detected_fn is not None
-                assert detected_keys is not None
-                # Convention on \n:
-                #
-                # We split up the response of each command into the "first line"
-                # (appears on the same line as the prompt and the detected keys) and the
-                # "later lines" (appears on subsequent lines).
-                # Every command should call the `_echo_first_line` or
-                # `_echo_later_lines` functions to do the right thing.
-                # Every command should end with a call to `_echo_newline_end_command` to
-                # insert the newline for the next prompt.
-                #
-                # We let each command handle doing this, as someone of them call out to
-                # other processes, which don't always do consistent things. This offers
-                # some wiggle room as an escape hatch. (E.g. `interact` leaves off
-                # `_echo_newline_end_command`).
-                click.echo(f"{detected_keys}: ", nl=False)
-                state = detected_fn(state)
+        while not state.done:
+            click.echo(prompt, nl=False)
+            try:
+                _safe_run_in_thread(app.run)
+            except EOFError as e:
+                raise RuntimeError(
+                    "Could not start the debugger, probably because it could not "
+                    "connect to `sys.{stdin,stdout}`.\n"
+                    "If you are using `breakpoint()` or `patdb.debug()` from "
+                    "within `pytest`, then this can be fixed by adding the `-s` "
+                    "flag.\n"
+                    "If you are using `patdb` from within an environment like "
+                    "Jupyter or Marimo, then unfortunately these are not "
+                    "compatible with `patdb`, as these environments do not support "
+                    "terminal emulation capabilities."
+                ) from e
+            assert detected_fn is not None
+            assert detected_keys is not None
+            # Convention on \n:
+            #
+            # We split up the response of each command into the "first line"
+            # (appears on the same line as the prompt and the detected keys) and the
+            # "later lines" (appears on subsequent lines).
+            # Every command should call the `_echo_first_line` or
+            # `_echo_later_lines` functions to do the right thing.
+            # Every command should end with a call to `_echo_newline_end_command` to
+            # insert the newline for the next prompt.
+            #
+            # We let each command handle doing this, as someone of them call out to
+            # other processes, which don't always do consistent things. This offers
+            # some wiggle room as an escape hatch. (E.g. `interact` leaves off
+            # `_echo_newline_end_command`).
+            click.echo(f"{detected_keys}: ", nl=False)
+            state = detected_fn(state)
 
     # We have a variable here that we explicitly hang on to for the lifetime of `debug`.
     # This `del` is used as a static assertion (for pyright) that it has *not* been
