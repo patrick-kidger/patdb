@@ -2578,6 +2578,8 @@ def debug(*args, stacklevel: int = 1):
 
 
 if sys.platform == "darwin" or sys.platform.startswith("linux"):
+    (pathlib.Path.home() / ".local" / "patdb").mkdir(parents=True, exist_ok=True)
+
     # I had a long painful time trying to get locking working with multiprocessing, and
     # did not succeed. At least on MacOS then it seems like `multiprocessing.Lock` only
     # works if either (a) you use the `fork` method, or (b) you pass the lock to the
@@ -2602,7 +2604,7 @@ if sys.platform == "darwin" or sys.platform.startswith("linux"):
             # below, not cheap!)
             self.lock = threading.Lock()
             self.filepath = (
-                pathlib.Path.home() / ".cache" / "patdb" / f"lock-{name}-{os.getpgrp()}"
+                pathlib.Path.home() / ".local" / "patdb" / f"lock-{name}-{os.getpgrp()}"
             )
 
         def __enter__(self):
