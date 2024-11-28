@@ -563,10 +563,13 @@ class _Frame:
             # `max` just in case someone is doing evil things and passing nonpositive
             # line numbers around. I can't imagine an example for that, but just in
             # case?
-            # -1 because line numbers start form 1.
+            # -1 because line numbers start from 1.
             source = source[max(0, self.f_code.co_firstlineno - 1) :]
             source = [line + "\n" for line in source]
-            source = inspect.getblock(source)
+            if self._frame.f_code.co_name != "<module>":
+                # This is the same condition used in `inspect.getsourcelines`, so
+                # hopefully it's reliable.
+                source = inspect.getblock(source)
             return [line.rstrip() for line in source]
 
     @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
