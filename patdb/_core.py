@@ -22,6 +22,7 @@ import threading
 import time
 import traceback
 import types
+import warnings
 import weakref
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any, Generic, Literal, NoReturn, Optional, overload, TypeVar, Union
@@ -1000,6 +1001,13 @@ def _disable_logging():
 
 
 @contextlib.contextmanager
+def _disable_jedi_warnings():
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", module="jedi")
+        yield
+
+
+@contextlib.contextmanager
 def _disable_imports():
     meta_path = sys.meta_path
     sys.meta_path = []
@@ -1048,6 +1056,9 @@ class _SafeCompleter(prompt_toolkit.completion.Completer):
             # Prevent Jedi from dynamically performing imports. We're using a debugger
             # here, so silently screwing with `sys.modules` is pretty confusing!
             _disable_imports(),
+            # Prevent Jedi from complaining about any nonimportable modules, with
+            # warnings of the form 'Module foo is not importable in path ...'.
+            _disable_jedi_warnings(),
         ):
             try:
                 iter_completions = iter(
