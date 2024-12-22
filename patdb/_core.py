@@ -2786,15 +2786,16 @@ def _debug(*args, stacklevel: int) -> list[bool]:
             frames = tuple(frames)
             find_visible = False
         elif isinstance(e, types.FrameType):
-            frame_infos = []
+            _frames: list[types.FrameType] = []
             while e is not None:
-                frame_infos.append(e)
+                _frames.append(e)
                 e = e.f_back
             frames = []
             frame_hidden = False
-            for frame_info in reversed(frame_infos):
-                frame_hidden = _is_frame_hidden(frame_info.frame, frame_hidden)
-                frames.append(_Frame(frame_info, frame_info.f_lineno, frame_hidden))
+            for frame in reversed(_frames):
+                frame_hidden = _is_frame_hidden(frame, frame_hidden)
+                frames.append(_Frame(frame, frame.f_lineno, frame_hidden))
+            del _frames
             frames = tuple(frames)
             find_visible = False
         elif isinstance(e, types.TracebackType):
