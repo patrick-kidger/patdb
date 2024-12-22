@@ -1796,9 +1796,12 @@ def _install_trace(
         return dataclasses.replace(state, done=True)
     else:
         _echo_first_line(
-            "The Python runtime already has a global trace function "
-            "enabled, perhaps from some other tool? Cannot jump to "
-            "other frames."
+            _patdb_info(
+                "The Python runtime already has a global trace function "
+                "enabled, perhaps from some other tool? Cannot jump to "
+                "other frames.",
+                state.depth,
+            )
         )
         _echo_newline_end_command()
         return state
