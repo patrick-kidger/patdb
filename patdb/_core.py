@@ -1883,6 +1883,7 @@ def _subprocess_edit(
     # Cache the source for all frames using this file, before we potentially modify the
     # file.
     _apply_to_frames_with_path(root_callstack, filepath, operator.methodcaller("cache"))
+    _echo_first_line(_emph(str(filepath)))
     if is_modified:
         _echo_later_lines(
             _patdb_info(
