@@ -551,7 +551,7 @@ class _Frame:
     # latter holds on to strong references to the `self` objects.
 
     @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
-    def function_source(self) -> Optional[list[str]]:
+    def function_source(self) -> Optional[tuple[str, list[str]]]:
         # This implementation is better than `inspect.getsourcelines`, in that we (a)
         # use our improved `file_source` implementation below (which is more robust to
         # bad `__pycache__`s than `inspect.getfile`) and (b) we produce the right
@@ -560,7 +560,7 @@ class _Frame:
         if filename__source is None:
             return None
         else:
-            _, source = filename__source
+            filename, source = filename__source
             # `max` just in case someone is doing evil things and passing nonpositive
             # line numbers around. I can't imagine an example for that, but just in
             # case?
@@ -571,7 +571,7 @@ class _Frame:
                 # This is the same condition used in `inspect.getsourcelines`, so
                 # hopefully it's reliable.
                 source = inspect.getblock(source)
-            return [line.rstrip() for line in source]
+            return filename, [line.rstrip() for line in source]
 
     @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
     def file_source(self) -> Optional[tuple[str, list[str]]]:
@@ -2043,12 +2043,14 @@ def _show_function(state: _State) -> _State:
         _echo_first_line(frame)
         _echo_newline_end_command()
     else:
-        lines = frame.function_source
-        if lines is None:
+        filepath__lines = frame.function_source
+        if filepath__lines is None:
             _echo_first_line("<no source found>")
             _echo_newline_end_command()
         else:
             # i.e. we're on the bottom frame
+            filepath, lines = filepath__lines
+            _echo_first_line(_emph(filepath))
             jump_line_num, should_jump = _show_source(
                 lines, frame.f_code.co_firstlineno, frame.line, state.depth
             )
@@ -2084,7 +2086,7 @@ def _show_file(state: _State) -> _State:
             _echo_newline_end_command()
         else:
             filepath, source = filepath__source
-            _echo_first_line(_bold(filepath))
+            _echo_first_line(_emph(filepath))
             jump_line_num, should_jump = _show_source(
                 source, 1, frame.line, state.depth
             )
