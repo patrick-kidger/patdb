@@ -1270,6 +1270,8 @@ def _make_key_bindings(key_mapping: dict[Callable, str], depth: int):
     fn_keys = {}
     keys_fn = {}
     for fn, keys in key_mapping.items():
+        if len(keys) == 0:
+            continue
         fn_keys[fn] = []
         for key in keys.split("/"):
             try:
@@ -2457,7 +2459,7 @@ def _interpret(state: _State) -> _State:
 
 
 def _visibility(state: _State) -> _State:
-    """Pretty-prints the value of an expression. (Wrap it in a `print` to normal-print.)"""  # noqa: E501
+    """Toggles skipping hidden frames when moving frames or callstacks."""
     state = dataclasses.replace(state, skip_hidden=not state.skip_hidden)
     if state.skip_hidden:
         _echo_first_line("Now skipping hidden frames.")
