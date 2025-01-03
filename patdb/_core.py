@@ -63,7 +63,8 @@ if sys.version_info >= (3, 10):
 else:
     import pprint
 
-    def pformat(text, width):
+    def pformat(text, width, short_arrays):
+        del short_arrays
         return pprint.pformat(
             text, width=width, compact=True, sort_dicts=False, underscore_numbers=True
         )
@@ -156,6 +157,10 @@ class _Config:
     @ft.cached_property
     def key_print(self) -> str:
         return os.getenv("PATDB_KEY_PRINT", "p")
+
+    @ft.cached_property
+    def key_print_long_arrays(self) -> str:
+        return os.getenv("PATDB_KEY_PRINT_LONG_ARRAYS", "")
 
     @ft.cached_property
     def key_edit(self) -> str:
@@ -1865,6 +1870,87 @@ def _make_namespaces(state: _State) -> tuple[dict[str, Any], dict[str, Any]]:
     return globals, locals
 
 
+def _pprint(state: _State, short_arrays: bool) -> _State:
+    frame = _current_frame(state.location)
+    if isinstance(frame, str):
+        _echo_first_line(frame)
+        _echo_newline_end_command()
+        return state
+    # Make a copy to avoid mutating `state`.
+    history = prompt_toolkit.history.InMemoryHistory(
+        list(reversed(list(state.print_history.load_history_strings())))
+    )
+    globals, locals = _make_namespaces(state)
+    # When using autocompletion then prompt_toolkit insists on starting at the start
+    # of the line. I decided not to fight this battle, and insert a newline just to
+    # avoid overwriting the `patdb>` prompt.
+    _echo_first_line("\n")
+    # When (a) running on Unix (Windows is still untested) and (b) using `ptpython`
+    # as our top-level Python interpreter, then the first couple of `p` evaluations
+    # will actually overwrite the `patdb>` prompt! (But not later ones, weirdly.)
+    #
+    # Here's a MWE using just `prompt_toolkit` that also works using just default
+    # `python` (no `ptpython` required):
+    #
+    # ```python
+    # import prompt_toolkit
+    # print("hi", end=""); prompt_toolkit.prompt("foo?")
+    # ```
+    #
+    # After much debugging it turns out to be linked to making cursor position
+    # requests. So we disable those.
+    # I think this is probably the best way to do that, but for what it's worth
+    # there is also a `PROMPT_TOOLKIT_NO_CPR=1` environment variable we could use
+    # instead.
+    output = prompt_toolkit.output.create_output()
+    if hasattr(output, "enable_cpr"):
+        output.enable_cpr = False  # pyright: ignore[reportAttributeAccessIssue]
+    # Note that we do *not* set the cursor: we want to keep using whatever default
+    # someone is already using.
+    session = prompt_toolkit.PromptSession(
+        message="",
+        history=history,
+        lexer=_prompt_lexer,
+        style=_prompt_style,
+        completer=_SafeCompleter(
+            ptpython.completer.PythonCompleter(
+                lambda: globals, lambda: locals, lambda: False
+            )
+        ),
+        complete_style=prompt_toolkit.shortcuts.CompleteStyle.MULTI_COLUMN,
+        include_default_pygments_style=False,
+        output=output,
+    )
+    try:
+        # We launch this in a thread because `prompt_toolkit` calls into the current
+        # asyncio loop. We don't want to do this -- we want to run our whole prompt
+        # in blocking fashion -- so we need to run the whole thing with a new loop,
+        # which necessarily means a new thread.
+        text = _safe_run_in_thread(session.prompt)
+    except (EOFError, KeyboardInterrupt):
+        return state
+    text_strip = text.strip()
+    if text_strip == "" or text_strip.startswith("#"):
+        return state
+    width = shutil.get_terminal_size().columns
+    try:
+        value = eval(text, globals, locals)
+        # We also include the formatting inside the `try`, as the object may have a
+        # malformed `__repr__`.
+        string = pformat(value, width=width, short_arrays=short_arrays)
+    except BaseException as e:
+        string = "\n".join(_format_exception(e, short=False))
+    else:
+        if "\x1b" not in string:
+            # If there's an escape code in there, then probably `string` has already
+            # returned something with pretty formatting. Let's not try to second-guess
+            # it.
+            string = _syntax_highlight(string)
+    _echo_first_line(string)  # `prompt` adds a newline.
+    _echo_newline_end_command()
+    return dataclasses.replace(state, print_history=history)
+
+
 def _apply_to_frames_with_path(
     root_callstack: _Callstack, filepath: pathlib.Path, fn: Callable[[_Frame], None]
 ):
@@ -2269,90 +2355,18 @@ def _stack(state: _State) -> _State:
 
 
 def _print(state: _State) -> _State:
-    """Pretty-prints the value of an expression. (Wrap it in a `print` to normal-print.)
+    """Pretty-prints the value of an expression.
 
     Printing a variable is such a common thing to do that we break our usual "minimal
     interface" rule, and we do offer a special command for this. (As opposed to opening
     an interpreter and printing the value there.)
     """
-    frame = _current_frame(state.location)
-    if isinstance(frame, str):
-        _echo_first_line(frame)
-        _echo_newline_end_command()
-        return state
-    # Make a copy to avoid mutating `state`.
-    history = prompt_toolkit.history.InMemoryHistory(
-        list(reversed(list(state.print_history.load_history_strings())))
-    )
-    globals, locals = _make_namespaces(state)
-    # When using autocompletion then prompt_toolkit insists on starting at the start
-    # of the line. I decided not to fight this battle, and insert a newline just to
-    # avoid overwriting the `patdb>` prompt.
-    _echo_first_line("\n")
-    # When (a) running on Unix (Windows is still untested) and (b) using `ptpython`
-    # as our top-level Python interpreter, then the first couple of `p` evaluations
-    # will actually overwrite the `patdb>` prompt! (But not later ones, weirdly.)
-    #
-    # Here's a MWE using just `prompt_toolkit` that also works using just default
-    # `python` (no `ptpython` required):
-    #
-    # ```python
-    # import prompt_toolkit
-    # print("hi", end=""); prompt_toolkit.prompt("foo?")
-    # ```
-    #
-    # After much debugging it turns out to be linked to making cursor position
-    # requests. So we disable those.
-    # I think this is probably the best way to do that, but for what it's worth
-    # there is also a `PROMPT_TOOLKIT_NO_CPR=1` environment variable we could use
-    # instead.
-    output = prompt_toolkit.output.create_output()
-    if hasattr(output, "enable_cpr"):
-        output.enable_cpr = False  # pyright: ignore[reportAttributeAccessIssue]
-    # Note that we do *not* set the cursor: we want to keep using whatever default
-    # someone is already using.
-    session = prompt_toolkit.PromptSession(
-        message="",
-        history=history,
-        lexer=_prompt_lexer,
-        style=_prompt_style,
-        completer=_SafeCompleter(
-            ptpython.completer.PythonCompleter(
-                lambda: globals, lambda: locals, lambda: False
-            )
-        ),
-        complete_style=prompt_toolkit.shortcuts.CompleteStyle.MULTI_COLUMN,
-        include_default_pygments_style=False,
-        output=output,
-    )
-    try:
-        # We launch this in a thread because `prompt_toolkit` calls into the current
-        # asyncio loop. We don't want to do this -- we want to run our whole prompt
-        # in blocking fashion -- so we need to run the whole thing with a new loop,
-        # which necessarily means a new thread.
-        text = _safe_run_in_thread(session.prompt)
-    except (EOFError, KeyboardInterrupt):
-        return state
-    text_strip = text.strip()
-    if text_strip == "" or text_strip.startswith("#"):
-        return state
-    width = shutil.get_terminal_size().columns
-    try:
-        value = eval(text, globals, locals)
-        # We also include the formatting inside the `try`, as the object may have a
-        # malformed `__repr__`.
-        string = pformat(value, width=width)
-    except BaseException as e:
-        string = "\n".join(_format_exception(e, short=False))
-    else:
-        if "\x1b" not in string:
-            # If there's an escape code in there, then probably `string` has already
-            # returned something with pretty formatting. Let's not try to second-guess
-            # it.
-            string = _syntax_highlight(string)
-    _echo_first_line(string)  # `prompt` adds a newline.
-    _echo_newline_end_command()
-    return dataclasses.replace(state, print_history=history)
+    return _pprint(state, short_arrays=True)
+
+
+def _print_long_arrays(state: _State) -> _State:
+    """Pretty-prints the value of an expression, without summarising arrays."""
+    return _pprint(state, short_arrays=False)
 
 
 def _edit(state: _State) -> _State:
@@ -2834,6 +2848,7 @@ def _debug(*args, stacklevel: int) -> list[bool]:
         _show_file: _config.key_show_file,
         _stack: _config.key_stack,
         _print: _config.key_print,
+        _print_long_arrays: _config.key_print_long_arrays,
         _edit: _config.key_edit,
         _interpret: _config.key_interpret,
         _visibility: _config.key_visibility,
