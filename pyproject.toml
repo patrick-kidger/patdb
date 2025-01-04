@@ -3,7 +3,7 @@ name = "patdb"
 version = "0.0.1"
 description = "Pat's Python debugger"
 readme = "README.md"
-requires-python ="~=3.9"
+requires-python =">=3.10"
 license = {file = "LICENSE"}
 authors = [
   {name = "Patrick Kidger", email = "contact@kidger.site"},
@@ -16,7 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 urls = {repository = "https://github.com/patrick-kidger/patdb" }
-dependencies = ["click>=8.1.7", "prompt_toolkit>=3.0.46", "ptpython>=3.0.27", "pygments>=2.14.0", "typing_extensions>=4.5.0"]
+dependencies = ["click>=8.1.7", "prompt_toolkit>=3.0.46", "ptpython>=3.0.27", "pygments>=2.14.0", "typing_extensions>=4.5.0", "wadler_lindig>=0.1.0"]
 entry-points = {pytest11 = {patdb = "patdb._pytest_plugin"}}
 
 [build-system]

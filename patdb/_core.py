@@ -54,20 +54,7 @@ import pygments.formatters
 import pygments.lexers
 import pygments.styles
 import pygments.token
-
-
-if sys.version_info >= (3, 10):
-    # Uses match statements, so >=3.10 only.
-    # They're just too pretty to remove, and 3.9 is close to end-of-life now anyway...
-    from ._pprint import pformat
-else:
-    import pprint
-
-    def pformat(text, width, short_arrays):
-        del short_arrays
-        return pprint.pformat(
-            text, width=width, compact=True, sort_dicts=False, underscore_numbers=True
-        )
+import wadler_lindig as wl
 
 
 #
@@ -1937,7 +1924,7 @@ def _pprint(state: _State, short_arrays: bool) -> _State:
         value = eval(text, globals, locals)
         # We also include the formatting inside the `try`, as the object may have a
         # malformed `__repr__`.
-        string = pformat(value, width=width, short_arrays=short_arrays)
+        string = wl.pformat(value, width=width, short_arrays=short_arrays)
     except BaseException as e:
         string = "\n".join(_format_exception(e, short=False))
     else:

@@ -11,4 +11,4 @@ repos:
     rev: v1.1.351
     hooks:
       - id: pyright
-        additional_dependencies: ["click>=8.1.7", "ptpython>=3.0.27", "pygments>=2.18.0"]
+        additional_dependencies: ["click>=8.1.7", "ptpython>=3.0.27", "pygments>=2.18.0", "wadler_lindig>=0.1.0"]
