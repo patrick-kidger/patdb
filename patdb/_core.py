@@ -570,25 +570,27 @@ class _Frame:
         filename = self.f_code.co_filename
         filepath = pathlib.Path(filename).resolve()
         if not filepath.exists():
-            # Could be that we hit an old `__pycache__` for some reason.
-            # I've seen `__pycache__` fail to be invalidated when moving a folder, for
-            # example. (Not sure why.)
-            # You could also maybe end up here if you're monkeying with import hooks.
-            # Another example in which you get here is when downloading an error from a
-            # remote execution, and debugging it locally.
+            # It's possible to hit this branch in a few cases.
             #
-            # I'm not sure if this branch will be any more reliable under such
-            # circumstances, but it can't hurt.
+            # - Hitting an old `__pycache__`. I've seen `__pycache__` fail to be
+            #   invalidated when moving a folder, for example. (Not sure why.)
+            # - If you're downloading an error from a remote execution and debugging
+            #   locally. Remotely the module is available at e.g.
+            #   `/root/path/to/file.py` whilst locally the module is available at e.g.
+            #   `~/your_repo/path/to/file.py`. But as long as the module names match up
+            #   then we might still be able to access the local version of the source
+            #   code.
+            # - You could maybe end up here if you're monkeying with import hooks.
             module_name = self.f_globals.get("__name__", None)
             if module_name is None:
                 return None
             module = sys.modules.get(module_name, None)
             if module is None:
                 return None
-            filepath = getattr(module, "__file__", None)
-            if filepath is None:
+            filename = getattr(module, "__file__", None)
+            if filename is None:
                 return None
-            filepath = pathlib.Path(filepath).resolve()
+            filepath = pathlib.Path(filename).resolve()
         if filepath.exists():
             source = filepath.read_text().rstrip()
             # Return the raw `filename`, not `filepath`. This is the 'pretty'
