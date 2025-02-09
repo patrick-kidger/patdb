@@ -32,7 +32,7 @@ Pass the `--patdb` flag, e.g. `pytest test_foo.py --patdb`, to open the debugger
 
 ### To open a debugger 'post mortem', after an error hits the top level:
 
-When running a file: `python -m patdb foo.py`. When running interactively: call `breakpoint()` after the error has returned you to the REPL. (Assuming you've set the environment variable as above.)
+When running a file: `python -m patdb foo.py`. When running a script: `python -m patdb -c "import foo; foo.bar()"`. When running interactively: call `breakpoint()` after the error has returned you to the REPL. (Assuming you've set the environment variable as above.)
 
 ## Commands
 
