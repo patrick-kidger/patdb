@@ -39,20 +39,21 @@ When running code on the command line: `python -m patdb -c "import foo; foo.prob
 ## Commands
 
 ```
-j: down_frame     - Move one frame down.
-k: up_frame       - Move one frame up.
-J: down_callstack - Move one callstack down.
-K: up_callstack   - Move one callstack up.
-s: show_function  - Show the current function's source code and interactively set breakpoints.
-S: show_file      - Show the current file's source code and interactively set breakpoints.
-t: stack          - Show all frames in all callstacks and interactively scroll through them.
-p: print          - Pretty-prints the value of an expression.
-e: edit           - Open the current function in your `$EDITOR`.
-i: interpret      - Open a Python interpreter in the current frame.
-v: visibility     - Toggles skipping hidden frames when moving frames or callstacks.
-c: continue       - Close the debugger and continue the program.
-q: quit           - Quit the whole Python program.
-?: help           - Display a list of all debugger commands.
+j: down_frame        - Move one frame down.
+k: up_frame          - Move one frame up.
+J: down_callstack    - Move one callstack down.
+K: up_callstack      - Move one callstack up.
+s: show_function     - Show the current function's source code and interactively set breakpoints.
+S: show_file         - Show the current file's source code and interactively set breakpoints.
+t: stack             - Show all frames in all callstacks and interactively scroll through them.
+p: print             - Pretty-prints the value of an expression.
+P: print_long_arrays - Pretty-prints the value of an expression, without summarising arrays.
+e: edit              - Open the current function in your `$EDITOR`.
+i: interpret         - Open a Python interpreter in the current frame.
+v: visibility        - Toggles skipping hidden frames when moving frames or callstacks.
+c: continue          - Close the debugger and continue the program.
+q: quit              - Quit the whole Python program.
+?: help              - Display a list of all debugger commands.
 ```
 
 These can be rebound, see 'configuration' below.

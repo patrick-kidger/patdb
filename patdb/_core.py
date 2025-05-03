@@ -147,7 +147,7 @@ class _Config:
 
     @ft.cached_property
     def key_print_long_arrays(self) -> str:
-        return os.getenv("PATDB_KEY_PRINT_LONG_ARRAYS", "")
+        return os.getenv("PATDB_KEY_PRINT_LONG_ARRAYS", "P")
 
     @ft.cached_property
     def key_edit(self) -> str:
