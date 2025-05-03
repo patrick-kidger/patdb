@@ -10,8 +10,8 @@
 
 <br>
 <div align="center">
-<img style="width: 70%;" src="https://github.com/patrick-kidger/patdb/blob/main/imgs/splash.png?raw=true" alt="Demo image"><br>
-<em>Here we have a program that raises an error. So we display the <code>s</code>ource of the problem function, then walk the s<code>t</code>ack into the nested <code>__cause__</code> of the exception, display the <code>s</code>ource of the called function, and finally open an <code>i</code>nterpreter inside that frame.</em>
+<div><em>Here we have a program that raises an error. So we display the <code>s</code>ource of the problem function, then walk the s<code>t</code>ack into the nested <code>__cause__</code> of the exception, display the <code>s</code>ource of the called function, and finally open an <code>i</code>nterpreter inside that frame.</em></div><br>
+<img style="width: 70%;" src="https://github.com/patrick-kidger/patdb/blob/main/imgs/splash.png?raw=true" alt="Demo image">
 </div>
 
 ## Installation
@@ -32,7 +32,9 @@ Pass the `--patdb` flag, e.g. `pytest test_foo.py --patdb`, to open the debugger
 
 ### To open a debugger 'post mortem', after an error hits the top level:
 
-When running a file: `python -m patdb foo.py`. When running a script: `python -m patdb -c "import foo; foo.bar()"`. When running interactively: call `breakpoint()` after the error has returned you to the REPL. (Assuming you've set the environment variable as above.)
+When running interactively: call `patdb.debug()` after the error has returned you to the REPL. (Or `breakpoint()` if you've set the environment variable as above.)  
+When running code in a file: `python -m patdb foo.py`.  
+When running code on the command line: `python -m patdb -c "import foo; foo.problematic_function()"`.
 
 ## Commands
 
@@ -44,7 +46,7 @@ K: up_callstack   - Move one callstack up.
 s: show_function  - Show the current function's source code and interactively set breakpoints.
 S: show_file      - Show the current file's source code and interactively set breakpoints.
 t: stack          - Show all frames in all callstacks and interactively scroll through them.
-p: print          - Pretty-prints the value of an expression. (Wrap it in a `print` to normal-print.)
+p: print          - Pretty-prints the value of an expression.
 e: edit           - Open the current function in your `$EDITOR`.
 i: interpret      - Open a Python interpreter in the current frame.
 v: visibility     - Toggles skipping hidden frames when moving frames or callstacks.
@@ -52,6 +54,8 @@ c: continue       - Close the debugger and continue the program.
 q: quit           - Quit the whole Python program.
 ?: help           - Display a list of all debugger commands.
 ```
+
+These can be rebound, see 'configuration' below.
 
 Here, a "callstack" refers to all of the frames in the traceback of a single exception, so e.g. `J` moves down to a nested exception.
 
@@ -185,7 +189,7 @@ and I couldn't easily figure out how to get any of them to operate correctly whe
 <summary>When using <code>edit</code>, how can I open my <code>$EDITOR</code> to the current line number? (And not just the top of the current file.)</summary>
 <br>
 
-Set `PATDB_EDITOR` as discussed in the configuration above.
+Set `PATDB_EDITOR` as discussed in 'configuration' above.
 </details>
 <details>
 <summary>How can I access the current exception or the current frame?</summary>
