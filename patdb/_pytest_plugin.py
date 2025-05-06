@@ -2,7 +2,6 @@ import argparse
 import inspect
 import sys
 import types
-from typing import Optional
 
 from . import _core
 
@@ -14,7 +13,7 @@ class _PytestToPatdb:
     def reset(self):
         pass
 
-    def interaction(self, _, _tb: Optional[types.TracebackType]):
+    def interaction(self, _, _tb: types.TracebackType | None):
         is_stop_iteration = False
         # If you have an error during test collection, trigger this function, and then
         # `q`uit, then you actually trigger this function again internally to pytest!

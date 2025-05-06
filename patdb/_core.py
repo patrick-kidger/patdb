@@ -25,8 +25,16 @@ import types
 import warnings
 import weakref
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any, Generic, Literal, NoReturn, Optional, overload, TypeVar, Union
-from typing_extensions import Self, TypeGuard
+from typing import (
+    Any,
+    Generic,
+    Literal,
+    NoReturn,
+    overload,
+    TypeGuard,
+    TypeVar,
+)
+from typing_extensions import Self
 
 import click
 import prompt_toolkit
@@ -271,26 +279,26 @@ class _Config:
         os.environ["PATDB_DEPTH"] = str(value)
 
     @ft.cached_property
-    def line_editor(self) -> Optional[str]:
+    def line_editor(self) -> str | None:
         return os.getenv("PATDB_EDITOR", None)
 
     @ft.cached_property
-    def editor(self) -> Optional[str]:
+    def editor(self) -> str | None:
         return os.getenv("EDITOR", None)
 
     @ft.cached_property
-    def colorfgbg(self) -> Optional[str]:
+    def colorfgbg(self) -> str | None:
         return os.getenv("COLORFGBG", None)
 
     @ft.cached_property
-    def ptpython_config_home(self) -> Optional[str]:
+    def ptpython_config_home(self) -> str | None:
         return os.getenv("PTPYTHON_CONFIG_HOME", None)
 
 
 _config = _Config()
 
 
-def _hex_to_rgb(x: str) -> Optional[tuple[int, int, int]]:
+def _hex_to_rgb(x: str) -> tuple[int, int, int] | None:
     x = _keep_fg_only(x)
     if x == "":
         return None
@@ -543,7 +551,7 @@ class _Frame:
     # latter holds on to strong references to the `self` objects.
 
     @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
-    def function_source(self) -> Optional[tuple[str, list[str]]]:
+    def function_source(self) -> tuple[str, list[str]] | None:
         # This implementation is better than `inspect.getsourcelines`, in that we (a)
         # use our improved `file_source` implementation below (which is more robust to
         # bad `__pycache__`s than `inspect.getfile`) and (b) we produce the right
@@ -566,7 +574,7 @@ class _Frame:
             return filename, [line.rstrip() for line in source]
 
     @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
-    def file_source(self) -> Optional[tuple[str, list[str]]]:
+    def file_source(self) -> tuple[str, list[str]] | None:
         filename = self.f_code.co_filename
         filepath = pathlib.Path(filename).resolve()
         if not filepath.exists():
@@ -640,18 +648,18 @@ class _CallstackKind(enum.Enum):
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class _Callstack:
-    _up_callstack: Optional[weakref.ref[Self]]
+    _up_callstack: weakref.ref[Self] | None
     down_callstacks: tuple[Self, ...]
     frames: tuple[_Frame, ...]
     kinds: frozenset[_CallstackKind]
-    exception: Optional[BaseException]
+    exception: BaseException | None
     collapse_default: bool
 
     def __post_init__(self):
         assert len(self.kinds) != 0
 
     @property
-    def up_callstack(self) -> Optional[Self]:
+    def up_callstack(self) -> Self | None:
         up_callstack = self._up_callstack
         if up_callstack is None:
             return None
@@ -712,7 +720,7 @@ def _file_trace(
 
 def _get_callstacks_from_error(
     exception: BaseException,
-    up_callstack: Optional[_Callstack],
+    up_callstack: _Callstack | None,
     kinds: frozenset[_CallstackKind],
     collapse_default: bool,
 ) -> _Callstack:
@@ -820,7 +828,7 @@ def _callstack_iter(
 @dataclasses.dataclass(frozen=True, eq=False)
 class _Location:
     callstack: _Callstack
-    frame_idx: Optional[int]
+    frame_idx: int | None
 
     def __post_init__(self):
         if len(self.callstack.frames) == 0:
@@ -830,7 +838,7 @@ class _Location:
             assert 0 <= self.frame_idx < len(self.callstack.frames)
 
 
-def _current_frame(location: _Location) -> Union[str, _Frame]:
+def _current_frame(location: _Location) -> str | _Frame:
     if location.frame_idx is None:
         return "<Frameless callstack>"
     else:
@@ -1150,8 +1158,8 @@ def _basic_app(
     initial_carry: _Carry,
     display: Callable[[_Carry], list[str]],
     key_mapping: dict[
-        Union[Callable[[_Carry], tuple[_Carry, bool]], Literal["left", "right"]],
-        tuple[str, Optional[str]],
+        Callable[[_Carry], tuple[_Carry, bool]] | Literal["left", "right"],
+        tuple[str, str | None],
     ],
     depth: int,
 ) -> _Carry:
@@ -1240,7 +1248,7 @@ def _patdb_prompt(depth: int) -> str:
     return click.style(prompt, fg=_config.prompt_colour)
 
 
-def _patdb_info(x: Union[str, list[str]], depth: int):
+def _patdb_info(x: str | list[str], depth: int):
     """Used to display information about `patdb` itself, e.g. command hints.
 
     Should NOT be used to display information about the current session state, e.g.
@@ -1341,7 +1349,7 @@ def _format_exception(e: BaseException, short: bool) -> list[str]:
         return [line.rstrip() for line in values]
 
 
-def _format_frame(frame: _Frame, prefix: Optional[str] = None) -> str:
+def _format_frame(frame: _Frame, prefix: str | None = None) -> str:
     file = frame.f_code.co_filename
     if file.startswith("/"):
         if prefix is not None:
@@ -1369,8 +1377,8 @@ def _format_frame(frame: _Frame, prefix: Optional[str] = None) -> str:
 
 def _format_callstack(
     callstack: _Callstack,
-    interactive_location: Optional[_Location],
-    current_location: Optional[_Location],
+    interactive_location: _Location | None,
+    current_location: _Location | None,
     skip_hidden: bool,
     short: bool,
     is_collapsed: Callable[[_Callstack], bool],
@@ -1549,8 +1557,7 @@ def _format_callstacks(
     for callstack_info_iterable in _callstack_iter(
         root_callstack, carry, update_indent, callstack_info
     ):
-        for line, is_interactive in callstack_info_iterable:
-            yield line, is_interactive
+        yield from callstack_info_iterable
 
 
 def _window_text(iterator: Iterator[tuple[str, bool]], ellipsis: str) -> list[str]:
@@ -1565,7 +1572,7 @@ def _window_text(iterator: Iterator[tuple[str, bool]], ellipsis: str) -> list[st
     outs = co.deque(maxlen=terminal_height)
     # We'll want to stop iterating once we get a certain amount past the stack our `>`
     # interaction marker is currently at.
-    its_the_final_countdown: Optional[int] = None
+    its_the_final_countdown: int | None = None
 
     first_line = None
     for line, is_interactive in iterator:
@@ -1638,14 +1645,14 @@ def _format_source(
 
 def _show_source(
     source: list[str], first_line_num: int, current_line_num: int, depth: int
-) -> tuple[Optional[int], bool]:
+) -> tuple[int | None, bool]:
     joined_source = "\n".join(source)
     last_line_num = first_line_num + len(source) - 1
     fg_ln = _hex_to_rgb(_PygmentsStyle.line_number_color)
     bg_ln = _hex_to_rgb(_PygmentsStyle.line_number_background_color)
     bg_line = _hex_to_rgb(_PygmentsStyle.background_color)
 
-    def _display(carry: tuple[Optional[int], bool]) -> list[str]:
+    def _display(carry: tuple[int | None, bool]) -> list[str]:
         interactive_line_num, _ = carry
         if interactive_line_num is None:
             interactive_line_num = current_line_num
@@ -1659,35 +1666,35 @@ def _show_source(
         )
 
     def _show_up_line(
-        carry: tuple[Optional[int], bool],
-    ) -> tuple[tuple[Optional[int], bool], bool]:
+        carry: tuple[int | None, bool],
+    ) -> tuple[tuple[int | None, bool], bool]:
         interactive_line_num, _ = carry
         assert interactive_line_num is not None
         return (max(first_line_num, interactive_line_num - 1), False), False
 
     def _show_down_line(
-        carry: tuple[Optional[int], bool],
-    ) -> tuple[tuple[Optional[int], bool], bool]:
+        carry: tuple[int | None, bool],
+    ) -> tuple[tuple[int | None, bool], bool]:
         interactive_line_num, _ = carry
         assert interactive_line_num is not None
         return (min(last_line_num, interactive_line_num + 1), False), False
 
     def _show_down_call(
-        carry: tuple[Optional[int], bool],
-    ) -> tuple[tuple[Optional[int], bool], bool]:
+        carry: tuple[int | None, bool],
+    ) -> tuple[tuple[int | None, bool], bool]:
         del carry
         return (None, True), True
 
     def _show_select(
-        carry: tuple[Optional[int], bool],
-    ) -> tuple[tuple[Optional[int], bool], bool]:
+        carry: tuple[int | None, bool],
+    ) -> tuple[tuple[int | None, bool], bool]:
         interactive_line_num, _ = carry
         assert interactive_line_num is not None
         return (interactive_line_num, True), True
 
     def _show_leave(
-        carry: tuple[Optional[int], bool],
-    ) -> tuple[tuple[Optional[int], bool], bool]:
+        carry: tuple[int | None, bool],
+    ) -> tuple[tuple[int | None, bool], bool]:
         interactive_line_num, _ = carry
         assert interactive_line_num is not None
         return (interactive_line_num, False), True
@@ -1711,7 +1718,7 @@ def _show_source(
     return _basic_app((current_line_num, False), _display, key_mapping, depth)
 
 
-def _show_line(frame: _Frame) -> Optional[str]:
+def _show_line(frame: _Frame) -> str | None:
     # Uses the file source, and not function source, because otherwise we get incorrect
     # results for generators: https://github.com/python/cpython/issues/121331
     filepath__source = frame.file_source
@@ -1734,7 +1741,7 @@ def _show_line(frame: _Frame) -> Optional[str]:
 
 
 def _install_trace(
-    filepath: pathlib.Path, jump_line_num: Optional[int], state: _State
+    filepath: pathlib.Path, jump_line_num: int | None, state: _State
 ) -> _State:
     if sys.gettrace() is None:
         if jump_line_num is None:
@@ -2724,7 +2731,7 @@ def _debug(*args, stacklevel: int) -> list[bool]:
     # Step 1: figure out how we're being called, and get the callstacks.
     #
 
-    e: Union[None, BaseException, types.TracebackType, types.FrameType]
+    e: None | BaseException | types.TracebackType | types.FrameType
     if len(args) == 0:
         # `debug()`
         # i.e. when `sys.breakpointhook = debug`
