@@ -547,34 +547,13 @@ class _Frame:
     # Important that these caches be `cached_property` and not `functools.cache`, as the
     # latter holds on to strong references to the `self` objects.
 
-    @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
-    def function_source(self) -> tuple[str, list[str]] | None:
-        # This implementation is better than `inspect.getsourcelines`, in that we (a)
-        # use our improved `file_source` implementation below (which is more robust to
-        # bad `__pycache__`s than `inspect.getfile`) and (b) we produce the right
-        # results for generators, rather than just producing their containing function.
-        filename__source = self.file_source
-        if filename__source is None:
-            return None
-        else:
-            filename, source = filename__source
-            # `max` just in case someone is doing evil things and passing nonpositive
-            # line numbers around. I can't imagine an example for that, but just in
-            # case?
-            # -1 because line numbers start from 1.
-            source = source[max(0, self.f_code.co_firstlineno - 1) :]
-            source = [line + "\n" for line in source]
-            if self._frame.f_code.co_name != "<module>":
-                # This is the same condition used in `inspect.getsourcelines`, so
-                # hopefully it's reliable.
-                source = inspect.getblock(source)
-            return filename, [line.rstrip() for line in source]
-
-    @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
-    def file_source(self) -> tuple[str, list[str]] | None:
+    @ft.cached_property
+    def local_filepath(self) -> None | pathlib.Path:
         filename = self.f_code.co_filename
         filepath = pathlib.Path(filename).resolve()
-        if not filepath.exists():
+        if filepath.exists():
+            return filepath
+        else:
             # It's possible to hit this branch in a few cases.
             #
             # - Hitting an old `__pycache__`. I've seen `__pycache__` fail to be
@@ -586,6 +565,8 @@ class _Frame:
             #   then we might still be able to access the local version of the source
             #   code.
             # - You could maybe end up here if you're monkeying with import hooks.
+            # - Maybe you're looking at something like `importlib._bootstrap`, which
+            #   lies about its name but not its `__file__`.
             module_name = self.f_globals.get("__name__", None)
             if module_name is None:
                 return None
@@ -596,15 +577,42 @@ class _Frame:
             if filename is None:
                 return None
             filepath = pathlib.Path(filename).resolve()
-        if filepath.exists():
-            source = filepath.read_text().rstrip()
-            # Return the raw `filename`, not `filepath`. This is the 'pretty'
-            # (unresolved) path.
-            return filename, source.splitlines()
-        else:
+            if filepath.exists():
+                return filepath
+            else:
+                return None
+
+    @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
+    def function_source(self) -> None | list[str]:
+        # This implementation is better than `inspect.getsourcelines`, in that we (a)
+        # use our improved `file_source` implementation below (which is more robust to
+        # bad `__pycache__`s than `inspect.getfile`) and (b) we produce the right
+        # results for generators, rather than just producing their containing function.
+        if self.file_source is None:
             return None
+        else:
+            # `max` just in case someone is doing evil things and passing nonpositive
+            # line numbers around. I can't imagine an example for that, but just in
+            # case?
+            # -1 because line numbers start from 1.
+            source = self.file_source[max(0, self.f_code.co_firstlineno - 1) :]
+            source = [line + "\n" for line in source]
+            if self._frame.f_code.co_name != "<module>":
+                # This is the same condition used in `inspect.getsourcelines`, so
+                # hopefully it's reliable.
+                source = inspect.getblock(source)
+            return [line.rstrip() for line in source]
+
+    @ft.cached_property  # Cache result in case we modify the file via `(e)dit`.
+    def file_source(self) -> None | list[str]:
+        filepath = self.local_filepath
+        if filepath is None:
+            return None
+        else:
+            return filepath.read_text().rstrip().splitlines()
 
     def cache(self):
+        self.local_filepath
         self.function_source
         self.file_source
 
@@ -1718,14 +1726,12 @@ def _show_source(
 def _show_line(frame: _Frame) -> str | None:
     # Uses the file source, and not function source, because otherwise we get incorrect
     # results for generators: https://github.com/python/cpython/issues/121331
-    filepath__source = frame.file_source
-    if filepath__source is None:
+    if frame.file_source is None:
         return None
     else:
-        _, source = filepath__source
         try:
             # -1 because line numbering starts from 1 but lists are index from 0.
-            source_line = source[frame.line - 1]
+            source_line = frame.file_source[frame.line - 1]
         except IndexError:
             # This can happen if the source file is modified between program start and
             # when the source code is accessed now.
@@ -2124,16 +2130,18 @@ def _show_function(state: _State) -> _State:
         _echo_first_line(frame)
         _echo_newline_end_command()
     else:
-        filepath__lines = frame.function_source
-        if filepath__lines is None:
+        if frame.function_source is None:
             _echo_first_line("<no source found>")
             _echo_newline_end_command()
         else:
             # i.e. we're on the bottom frame
-            filepath, lines = filepath__lines
-            _echo_first_line(_emph(filepath))
+            assert frame.local_filepath is not None
+            _echo_first_line(_emph(str(frame.local_filepath)))
             jump_line_num, should_jump = _show_source(
-                lines, frame.f_code.co_firstlineno, frame.line, state.depth
+                frame.function_source,
+                frame.f_code.co_firstlineno,
+                frame.line,
+                state.depth,
             )
             if should_jump and jump_line_num != frame.line:
                 # Note that we choose to modify the global trace hook here, *not* the
@@ -2161,15 +2169,14 @@ def _show_file(state: _State) -> _State:
         _echo_first_line(frame)
         _echo_newline_end_command()
     else:
-        filepath__source = frame.file_source
-        if filepath__source is None:
+        if frame.file_source is None:
             _echo_first_line("<no source found>")
             _echo_newline_end_command()
         else:
-            filepath, source = filepath__source
-            _echo_first_line(_emph(filepath))
+            assert frame.local_filepath is not None
+            _echo_first_line(_emph(str(frame.local_filepath)))
             jump_line_num, should_jump = _show_source(
-                source, 1, frame.line, state.depth
+                frame.file_source, 1, frame.line, state.depth
             )
             assert jump_line_num is not None
             if should_jump and jump_line_num != frame.line:
@@ -2376,17 +2383,20 @@ def _edit(state: _State) -> _State:
         _echo_first_line(frame)
         _echo_newline_end_command()
         return state
-    filename = frame.f_code.co_filename
-    filepath = pathlib.Path(filename).resolve()
-    if not filepath.exists():
+    interpreter_filename = frame.f_code.co_filename
+    local_filepath = frame.local_filepath
+    if local_filepath is None:
         _echo_later_lines(
-            _patdb_info(f"No source available for filename `{filename}`.", state.depth)
+            _patdb_info(
+                f"No source available for filename `{interpreter_filename}`.",
+                state.depth,
+            )
         )
         _echo_newline_end_command()
         return state
     linenumber = str(frame.line)
     line_editor = _config.line_editor
-    is_modified = filepath in state.modified_files
+    is_modified = local_filepath in state.modified_files
     if line_editor is None or line_editor == "":
         editor = _config.editor
         if editor is None or editor == "":
@@ -2399,18 +2409,18 @@ def _edit(state: _State) -> _State:
             modified = False
         else:
             returncode, modified = _subprocess_edit(
-                [editor, filename],
+                [editor, str(local_filepath)],
                 state.root_callstack,
-                filepath,
+                local_filepath,
                 "EDITOR",
                 state.depth,
                 is_modified,
             )
     else:
         returncode, modified = _subprocess_edit(
-            [line_editor, filename, linenumber],
+            [line_editor, str(local_filepath), linenumber],
             state.root_callstack,
-            filepath,
+            local_filepath,
             "PATDB_EDITOR",
             state.depth,
             is_modified,
@@ -2421,9 +2431,7 @@ def _edit(state: _State) -> _State:
         )
     _echo_newline_end_command()
     if modified:
-        modified_files = frozenset(
-            {*state.modified_files, pathlib.Path(filename).resolve()}
-        )
+        modified_files = frozenset({*state.modified_files, local_filepath})
         state = dataclasses.replace(state, modified_files=modified_files)
     return state
 
