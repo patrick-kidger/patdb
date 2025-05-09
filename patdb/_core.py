@@ -1026,7 +1026,9 @@ def _disable_imports():
     # The solution is to pretend that it's already fully imported.
     initializing_modules = set()
     for mod in sys.modules.values():
-        if getattr(getattr(mod, "__spec__", None), "_initializing", False):
+        if inspect.getattr_static(
+            inspect.getattr_static(mod, "__spec__", None), "_initializing", False
+        ):
             del mod.__spec__._initializing  # pyright: ignore
             initializing_modules.add(mod)
     try:
