@@ -1018,9 +1018,22 @@ def _disable_jedi_warnings():
 def _disable_imports():
     meta_path = sys.meta_path
     sys.meta_path = []
+    # This `initializing_modules` trickery is pretty evil.
+    # The problem is that `ptpython` (via `i`nterpret) or `prompt_toolkit` (via `p`rint)
+    # use Jedi for completions, and this will attempt to dynamically import modules.
+    # If that module is itself currently being imported (because you have a module-level
+    # breakpoint) then this will cause a deadlock.
+    # The solution is to pretend that it's already fully imported.
+    initializing_modules = set()
+    for mod in sys.modules.values():
+        if getattr(getattr(mod, "__spec__", None), "_initializing", False):
+            del mod.__spec__._initializing  # pyright: ignore
+            initializing_modules.add(mod)
     try:
         yield
     finally:
+        for mod in initializing_modules:
+            mod.__spec__._initializing = True
         sys.meta_path = meta_path
 
 
