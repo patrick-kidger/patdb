@@ -1,7 +1,10 @@
 import argparse
 import inspect
+import os
 import sys
 import types
+
+import click
 
 from . import _core
 
@@ -38,6 +41,7 @@ class _PytestToPatdb:
             _tb = _tb.tb_next
         else:
             return  # Internal pytest error during quitting.
+
         # The traceback is useless to us, it doesn't have any way of getting the
         # __cause__ or __context__ of the actual exception. Just delete it.
         del _tb
@@ -54,15 +58,16 @@ class _PytestToPatdb:
             # In this case, it's time for an awful hack.
             # Unfortunately the `_tb` argument doesn't give us what we want. So we walk
             # walk the stack and grab the thing we do want!
-            # This is wrapped in a try-except just for forward compatibility, in case
-            # the pytest folks ever change things.
-            try:
-                frame = inspect.stack()[2]
-                e = frame.frame.f_locals["excinfo"].value
-            except Exception:
-                return
+            frame = inspect.stack()[2]
+            e = frame.frame.f_locals["excinfo"].value
         if is_stop_iteration:  # More working around pytest bugs.
             e = e.__context__
+        try:
+            current_test = os.environ["PYTEST_CURRENT_TEST"]
+        except KeyError:
+            pass  # I don't think getting here is possible, but just in case.
+        else:
+            click.echo(" Failing test: " + _core.emph(current_test))
         try:
             _core.debug(e)
         except SystemExit:

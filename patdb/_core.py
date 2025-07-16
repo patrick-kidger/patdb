@@ -388,7 +388,7 @@ def _syntax_highlight(source: str) -> str:
     return "".join(outs)
 
 
-def _emph(x: str) -> str:
+def emph(x: str) -> str:
     return click.style(x, fg=_config.emph_colour, reset=False) + click.style(
         "", fg="reset", reset=False
     )
@@ -1390,8 +1390,8 @@ def _format_frame(frame: _Frame, prefix: str | None = None) -> str:
         lbr = " "
         rbr = " "
     return (
-        f"{lbr}File {_emph(file)}, at {_emph(name)} from {_emph(function_line)}, "
-        f"line {_emph(current_line)}{rbr}"
+        f"{lbr}File {emph(file)}, at {emph(name)} from {emph(function_line)}, "
+        f"line {emph(current_line)}{rbr}"
     )
 
 
@@ -1988,7 +1988,7 @@ def _subprocess_edit(
     # Cache the source for all frames using this file, before we potentially modify the
     # file.
     _apply_to_frames_with_path(root_callstack, filepath, operator.methodcaller("cache"))
-    _echo_first_line(_emph(str(filepath)))
+    _echo_first_line(emph(str(filepath)))
     if is_modified:
         _echo_later_lines(
             _patdb_info(
@@ -2151,7 +2151,7 @@ def _show_function(state: _State) -> _State:
         else:
             # i.e. we're on the bottom frame
             assert frame.local_filepath is not None
-            _echo_first_line(_emph(str(frame.local_filepath)))
+            _echo_first_line(emph(str(frame.local_filepath)))
             jump_line_num, should_jump = _show_source(
                 frame.function_source,
                 frame.f_code.co_firstlineno,
@@ -2189,7 +2189,7 @@ def _show_file(state: _State) -> _State:
             _echo_newline_end_command()
         else:
             assert frame.local_filepath is not None
-            _echo_first_line(_emph(str(frame.local_filepath)))
+            _echo_first_line(emph(str(frame.local_filepath)))
             jump_line_num, should_jump = _show_source(
                 frame.file_source, 1, frame.line, state.depth
             )
