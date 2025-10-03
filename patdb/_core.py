@@ -31,10 +31,10 @@ from typing import (
     Literal,
     NoReturn,
     overload,
+    Self,
     TypeGuard,
     TypeVar,
 )
-from typing_extensions import Self
 
 import click
 import prompt_toolkit

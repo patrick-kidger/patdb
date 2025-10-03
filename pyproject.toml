@@ -19,7 +19,7 @@ keywords = ["pdb", "bdb", "patdb", "debug", "debugger"]
 license = {file = "LICENSE"}
 name = "patdb"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 urls = {repository = "https://github.com/patrick-kidger/patdb"}
 version = "0.1.1"
 
@@ -42,7 +42,6 @@ src = []
 [tool.ruff.lint]
 fixable = ["I001", "F401", "UP"]
 ignore = ["E402", "E721", "E731", "E741", "F722"]
-ignore-init-module-imports = true
 select = ["E", "F", "I001", "ICN", "UP"]
 
 [tool.ruff.lint.flake8-import-conventions.extend-aliases]
