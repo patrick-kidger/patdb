@@ -2674,7 +2674,7 @@ if sys.platform == "darwin" or sys.platform.startswith("linux"):
             self.filepath.unlink()
             return self.lock.__exit__(exc_type, exc_val, exc_tb)
 else:
-    _Lock = lambda name: threading.Lock()
+    _Lock = lambda name: threading.Lock()  # pyright: ignore[reportAssignmentType]
 
 
 _metalock = _Lock(name="meta")
