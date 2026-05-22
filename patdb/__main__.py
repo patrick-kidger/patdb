@@ -2,13 +2,14 @@ import inspect
 import pathlib
 import sys
 import tempfile
+from collections.abc import Sequence
 
-import click
+import seali
 
 from ._core import debug
 
 
-def _run(filepath: str, args: list[str]):
+def _run(filepath: str, args: Sequence[str]):
     import runpy
 
     sys.argv = [filepath, *args]
@@ -21,10 +22,8 @@ def _run(filepath: str, args: list[str]):
         sys.exit(1)
 
 
-@click.command()
-@click.option("-c")
-@click.argument("args", nargs=-1)
-def run(c, args):
+@seali.command
+def run(*args: str, c: None | str = None):
     for frame in inspect.stack():
         frame.frame.f_locals["__tracebackhide__"] = True
 
@@ -37,8 +36,8 @@ def run(c, args):
             return
         else:
             # `python -m patdb foo.py some args here`
-            filepath, *args = args
-            _run(filepath, args)
+            filepath, *args_rest = args
+            _run(filepath, args_rest)
     else:
         # `python -m patdb -c 'some program' some args here`
         # We write the program to a temporary file to enable easier debugging: you
